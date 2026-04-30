@@ -127,7 +127,7 @@ function main(): void {
     assert(!/powershell/i.test(commandDescription), 'command field must not advertise PowerShell')
   })
 
-  test('TOOL_USAGE_RULES contains the three critical nudges', () => {
+  test('TOOL_USAGE_RULES contains schema, recovery, and primitive nudges', () => {
     const r = GEMINI_TOOL_USAGE_RULES
     assert(r.includes('<TOOL_USAGE_RULES>'), 'XML wrapper present')
     assert(/Supply EVERY parameter listed in "required"/.test(r),
@@ -136,17 +136,37 @@ function main(): void {
       'empty-object nudge missing')
     assert(/Do not invent extra parameters/i.test(r),
       'no-invention nudge missing')
+    assert(/don't retry blindly/i.test(r),
+      'no-blind-retry nudge missing')
+    assert(/corrected retry/i.test(r),
+      'corrected-retry nudge missing')
+    assert(/don't abandon a viable approach/i.test(r),
+      "don't-abandon nudge missing")
+    assert(/punt\/paste commands/i.test(r),
+      "don't-punt nudge missing")
+    assert(/background retry/i.test(r) && /retry started/i.test(r),
+      'background-retry-monitoring nudge missing')
+    assert(/Bash autonomy/i.test(r) && /run them/i.test(r),
+      'Bash autonomy nudge missing')
+    assert(/Skill tool/i.test(r) && /Only use listed skills/i.test(r),
+      'Skill tool nudge missing')
+    assert(/Agent tool/i.test(r) && /subagent_type/i.test(r),
+      'Agent/subagent nudge missing')
+    assert(/claude mcp add/i.test(r) && /normal Bash commands/i.test(r),
+      'MCP command nudge missing')
   })
 
-  test('TOOL_USAGE_RULES under 1024 bytes (cost budget)', () => {
+  test('TOOL_USAGE_RULES under 2048 bytes (cost budget)', () => {
     // The preamble lands on every Gemini turn (cached after the first), so
-    // it must stay under 1KB. Two concerns share this block:
+    // it must stay under 2KB. Three concerns share this block:
     //   1. Schema authority (anti-empty-args nudge for Flash-class).
-    //   2. Failure-recovery rule (don't iterate cosmetic command variants).
-    // Both are belt-and-suspenders against a model behavior that's expensive
-    // when it slips — so the byte cost is well-justified at this ceiling.
+    //   2. Failure-recovery (don't blind-retry, don't abandon, don't punt).
+    //   3. Claude-Code-primitive parity (Bash autonomy, Skills, Agent, MCP).
+    // Each is belt-and-suspenders against a model behavior that's expensive
+    // when it slips — one prevented "punt to user" turn pays for the byte
+    // cost ten times over. Cached after turn 1, so steady-state cost is zero.
     const b = Buffer.byteLength(GEMINI_TOOL_USAGE_RULES, 'utf-8')
-    assert(b < 1024, `preamble too long (${b} bytes) — eats cache budget`)
+    assert(b < 2048, `preamble too long (${b} bytes) — eats cache budget`)
   })
 
   console.log(`\n${passed} passed, ${failed} failed`)

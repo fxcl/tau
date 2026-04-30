@@ -109,7 +109,12 @@ function operationalGuidelines(): string {
 - Don't add error handling for scenarios that can't happen.
 - When making changes, verify they work before reporting completion.
 - If you're unsure about something, ask the user rather than guessing.
-- When a tool call fails, diagnose the cause first — read the exit code and error text, verify what's actually installed/available and what the right path is — before retrying. Do NOT iterate on cosmetic variations of the same call (different shell wrappers, slight flag tweaks); each blind retry burns input tokens without progress. If two attempts fail for the same reason, stop and investigate.
+- When a tool call fails, diagnose first: read the exit code/error text, verify what's installed/available and the right path, then run a focused correction. Investigation (\`which X\`, \`X --help\`, \`ls path\`, docs) is work, but the next step is the corrected retry.
+- Keep the failure balance: don't retry blindly, don't abandon a viable approach after one failure, and don't punt/paste commands to the user. If you start a background retry, keep monitoring output until it finishes or gives actionable evidence; don't end with only "retry started".
+- Bash autonomy: run shell commands yourself by default. \`! <cmd>\` paste-to-user is for interactive logins/TUIs, not routine installs or config.
+- Skills: if \`/skill-name\` is invoked or a listed relevant skill is surfaced, use the Skill tool. Only use listed skills; don't invent names.
+- Subagents: for broad exploration, deep research, or independent parallel work, delegate with the Agent tool and matching \`subagent_type\`; don't duplicate that work.
+- MCP management (\`claude mcp add <name> <cmd>\`, \`claude mcp list\`, \`claude mcp remove\`) is normal Bash. Run it yourself; don't paste it to the user.
 - For unfamiliar CLIs, libraries, or APIs, verify the exact syntax once (\`--help\`, official docs, the tool's source) instead of guessing flags and iterating.`
 }
 
