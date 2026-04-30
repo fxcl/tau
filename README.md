@@ -43,7 +43,13 @@ claudex
 ```
 
 ---
+## Update
 
+```bash
+claudex update
+```
+
+---
 ## The Four Commands You Need to Know
 
 ### `/login` — Start here
