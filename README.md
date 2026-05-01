@@ -64,6 +64,9 @@ Shows every connected provider and their current status. Configured, available, 
 
 Live model browser. Fetches the actual catalog from your provider's API in real time. Search, filter, and set any model as your active one.
 
+**`/fallback`** — Automatic recovery when a model fails mid-session. Configure a fallback and never lose your work to a provider outage again.
+
+
 ```
 /models                     open the full picker
 /models <query>             search active provider
@@ -112,8 +115,6 @@ File editing, bash execution, glob, grep, web search, web fetch, MCP servers, ho
 ## Coming Soon
 
 **`/surf`** — Intelligent model routing. Claudex reads the task and routes to the best available model automatically. Experimental, in progress.
-
-**`/fallback`** — Automatic recovery when a model fails mid-session. Configure a fallback and never lose your work to a provider outage again.
 
 **`/github-me`** — A tool that handles the full development lifecycle: review, edit, CI/CD, testing, and automation of every GitHub action you'd otherwise do manually.
 
