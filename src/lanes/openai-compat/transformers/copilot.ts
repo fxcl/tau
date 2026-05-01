@@ -11,8 +11,8 @@
  * Reference: reference/9router-master/open-sse/executors/github.js.
  */
 
-import type { Transformer, TransformContext } from './base.js'
-import type { OpenAIChatRequest } from './shared_types.js'
+import type { HeaderContext, Transformer, TransformContext } from './base.js'
+import type { OpenAIChatMessage, OpenAIChatRequest } from './shared_types.js'
 import { isCopilotModelAllowedForCurrentPlan } from '../../../utils/model/copilotAccount.js'
 
 // Headers below mirror the reference executor exactly. The chat gateway
@@ -109,6 +109,96 @@ function _isCurrentPlanEligibleCopilotModel(model: string): boolean {
   return isCopilotModelAllowedForCurrentPlan(model)
 }
 
+type PendingToolCalls = {
+  assistantIndex: number
+  pendingIds: Set<string>
+  answeredIds: Set<string>
+}
+
+function _finalizePendingToolCalls(messages: OpenAIChatMessage[], pending: PendingToolCalls): void {
+  const assistant = messages[pending.assistantIndex]
+  if (!assistant?.tool_calls?.length) return
+
+  const seen = new Set<string>()
+  const keptToolCalls = assistant.tool_calls.filter(call => {
+    if (!pending.answeredIds.has(call.id) || seen.has(call.id)) return false
+    seen.add(call.id)
+    return true
+  })
+
+  if (keptToolCalls.length > 0) {
+    assistant.tool_calls = keptToolCalls
+  } else {
+    delete assistant.tool_calls
+    if (assistant.content == null) assistant.content = ''
+  }
+}
+
+function _dedupeToolCalls(message: OpenAIChatMessage): OpenAIChatMessage {
+  if (!message.tool_calls?.length) return message
+
+  const seen = new Set<string>()
+  const toolCalls = message.tool_calls.filter(call => {
+    if (!call.id || seen.has(call.id)) return false
+    seen.add(call.id)
+    return true
+  })
+
+  if (toolCalls.length > 0) {
+    return { ...message, tool_calls: toolCalls }
+  }
+
+  const next = { ...message }
+  delete next.tool_calls
+  if (next.content == null) next.content = ''
+  return next
+}
+
+// Copilot uses OpenAI's strict adjacency rule: assistant tool_calls must be
+// immediately followed by tool messages for every id. Interrupted or compacted
+// histories can replay unresolved tool calls, so trim only the invalid tail.
+function _sanitizeToolCallAdjacency(messages: OpenAIChatMessage[]): OpenAIChatMessage[] {
+  const out: OpenAIChatMessage[] = []
+  let pending: PendingToolCalls | null = null
+
+  for (const message of messages) {
+    if (message.role === 'tool') {
+      const toolCallId = message.tool_call_id
+      if (pending && toolCallId && pending.pendingIds.has(toolCallId)) {
+        out.push(message.content == null ? { ...message, content: '' } : message)
+        pending.pendingIds.delete(toolCallId)
+        pending.answeredIds.add(toolCallId)
+        if (pending.pendingIds.size === 0) pending = null
+      }
+      continue
+    }
+
+    if (pending) {
+      _finalizePendingToolCalls(out, pending)
+      pending = null
+    }
+
+    if (message.role === 'assistant' && message.tool_calls?.length) {
+      const assistant = _dedupeToolCalls(message)
+      out.push(assistant)
+
+      if (assistant.tool_calls?.length) {
+        pending = {
+          assistantIndex: out.length - 1,
+          pendingIds: new Set(assistant.tool_calls.map(call => call.id)),
+          answeredIds: new Set<string>(),
+        }
+      }
+      continue
+    }
+
+    out.push(message)
+  }
+
+  if (pending) _finalizePendingToolCalls(out, pending)
+  return out
+}
+
 function _copilotDisplayName(id: string): string {
   const lowered = id.toLowerCase()
   const override = COPILOT_NAME_OVERRIDES[lowered]
@@ -127,8 +217,8 @@ export const copilotTransformer: Transformer = {
     return requested
   },
 
-  buildHeaders(_apiKey: string): Record<string, string> {
-    return {
+  buildHeaders(_apiKey: string, ctx?: HeaderContext): Record<string, string> {
+    const headers: Record<string, string> = {
       'copilot-integration-id': COPILOT_INTEGRATION_ID,
       'editor-version': `vscode/${COPILOT_VSCODE_VERSION}`,
       'editor-plugin-version': `copilot-chat/${COPILOT_CHAT_VERSION}`,
@@ -139,9 +229,18 @@ export const copilotTransformer: Transformer = {
       'X-Initiator': 'user',
       'x-request-id': _requestId(),
     }
+    if (ctx?.sessionId) {
+      headers.session_id = ctx.sessionId
+      headers['x-client-request-id'] = ctx.sessionId
+      headers['x-session-affinity'] = ctx.sessionId
+    }
+    return headers
   },
 
   transformRequest(body: OpenAIChatRequest, ctx: TransformContext): OpenAIChatRequest {
+    if (ctx.sessionId) {
+      body.prompt_cache_key = ctx.sessionId
+    }
     if (_requiresMaxCompletionTokens(ctx.model) && body.max_tokens !== undefined) {
       const v = body.max_tokens
       delete body.max_tokens
@@ -156,6 +255,7 @@ export const copilotTransformer: Transformer = {
     delete body.thinking
     delete body.reasoning_effort
     delete body.reasoning
+    body.messages = _sanitizeToolCallAdjacency(body.messages)
     return body
   },
 

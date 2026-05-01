@@ -30,6 +30,7 @@ import type {
 } from '../services/api/providers/base_provider.js'
 import { buildProviderStreamResult } from '../services/api/providers/base_provider.js'
 import type { Lane } from './types.js'
+import { getSessionId } from '../bootstrap/state.js'
 
 export class LaneBackedProvider implements BaseProvider {
   readonly name: string
@@ -82,6 +83,7 @@ export class LaneBackedProvider implements BaseProvider {
         stop_sequences: params.stop_sequences,
         thinking: params.thinking,
         signal: controller.signal,
+        ...(providerHint === 'copilot' ? { sessionId: getSessionId() } : {}),
         providerHint: providerHint,
       })
       for await (const ev of gen) {

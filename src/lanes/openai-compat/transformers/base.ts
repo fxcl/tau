@@ -35,6 +35,15 @@ export interface TransformContext {
   isReasoning: boolean
   /** Mapped reasoning-effort ("low" | "medium" | "high") or null. */
   reasoningEffort: 'low' | 'medium' | 'high' | null
+  /** Stable claudex session id, used only by providers with cache affinity. */
+  sessionId?: string
+}
+
+export interface HeaderContext {
+  /** Original model id the user asked for. */
+  model: string
+  /** Stable claudex session id, used only by providers with cache affinity. */
+  sessionId?: string
 }
 
 export interface Transformer {
@@ -48,7 +57,7 @@ export interface Transformer {
    * Extra HTTP headers per request (auth is added separately).
    * Example: OpenRouter's HTTP-Referer + X-Title.
    */
-  buildHeaders?(apiKey: string): Record<string, string>
+  buildHeaders?(apiKey: string, ctx?: HeaderContext): Record<string, string>
 
   /**
    * Does this provider honor OpenAI's `function.strict: true` schema

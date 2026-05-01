@@ -134,6 +134,8 @@ export interface LaneProviderCallParams {
   stop_sequences?: string[]
   thinking?: ProviderRequestParams['thinking']
   signal: AbortSignal
+  /** Stable claudex session id for provider-side prompt-cache affinity. */
+  sessionId?: string
   /**
    * Which sub-provider the shim was built for (e.g. 'groq',
    * 'openrouter', 'deepseek'). Shared lanes like openai-compat use

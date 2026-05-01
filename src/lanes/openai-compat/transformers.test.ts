@@ -24,7 +24,7 @@
 
 import { TRANSFORMERS, getTransformer } from './transformers/index.js'
 import type { Transformer, TransformContext } from './transformers/base.js'
-import type { OpenAIChatRequest } from './transformers/shared_types.js'
+import type { OpenAIChatMessage, OpenAIChatRequest } from './transformers/shared_types.js'
 import { selectEditToolSet, OPENAI_COMPAT_TOOL_REGISTRY } from './tools.js'
 import { resolveEditFormat, resolveCapabilities } from './capabilities.js'
 import { setDeepSeekV4Thinking } from '../../utils/model/deepseekThinking.js'
@@ -59,6 +59,14 @@ function mkBody(model: string, overrides: Partial<OpenAIChatRequest> = {}): Open
     stream_options: { include_usage: true },
     max_tokens: 4096,
     ...overrides,
+  }
+}
+
+function mkToolCall(id: string, name = 'Read'): NonNullable<OpenAIChatMessage['tool_calls']>[number] {
+  return {
+    id,
+    type: 'function',
+    function: { name, arguments: '{}' },
   }
 }
 
@@ -329,6 +337,103 @@ function main(): void {
       TRANSFORMERS.openrouter.cacheControlMode('meta-llama/llama-3.3-70b-instruct') === 'none',
       'wanted none for Llama routing',
     )
+  })
+  test('copilot sends stable session affinity headers', () => {
+    const h = TRANSFORMERS.copilot.buildHeaders?.('copilot-token', {
+      model: 'gpt-5.2',
+      sessionId: 'session-fixed',
+    }) ?? {}
+    assert(h.session_id === 'session-fixed', `session_id=${h.session_id}`)
+    assert(h['x-client-request-id'] === 'session-fixed', `x-client-request-id=${h['x-client-request-id']}`)
+    assert(h['x-session-affinity'] === 'session-fixed', `x-session-affinity=${h['x-session-affinity']}`)
+    assert(typeof h['x-request-id'] === 'string' && h['x-request-id'].length > 0, 'x-request-id missing')
+  })
+  test('copilot injects prompt_cache_key from session id', () => {
+    const body = mkBody('gpt-5.2')
+    TRANSFORMERS.copilot.transformRequest(body, {
+      model: 'gpt-5.2',
+      isReasoning: false,
+      reasoningEffort: null,
+      sessionId: 'session-fixed',
+    })
+    assert(body.prompt_cache_key === 'session-fixed', `prompt_cache_key=${body.prompt_cache_key}`)
+  })
+  test('copilot omits prompt_cache_key when session id is absent', () => {
+    const body = mkBody('gpt-4.1')
+    TRANSFORMERS.copilot.transformRequest(body, mkCtx('gpt-4.1'))
+    assert(body.prompt_cache_key === undefined, `prompt_cache_key=${body.prompt_cache_key}`)
+  })
+  test('copilot trims tool_calls to immediately answered tool messages', () => {
+    const body = mkBody('claude-sonnet-4.5', {
+      messages: [
+        { role: 'user', content: 'start' },
+        {
+          role: 'assistant',
+          content: null,
+          tool_calls: [
+            mkToolCall('toolu_compat_call_answered', 'Read'),
+            mkToolCall('toolu_compat_call_missing', 'Grep'),
+          ],
+        },
+        { role: 'tool', tool_call_id: 'toolu_compat_call_answered', content: 'ok' },
+        { role: 'user', content: 'continue' },
+      ],
+    })
+
+    TRANSFORMERS.copilot.transformRequest(body, mkCtx('claude-sonnet-4.5'))
+
+    const assistant = body.messages[1]
+    assert(assistant?.role === 'assistant', `assistant role=${assistant?.role}`)
+    assert(assistant.tool_calls?.length === 1,
+      `tool_calls=${JSON.stringify(assistant.tool_calls)}`)
+    assert(assistant.tool_calls?.[0]?.id === 'toolu_compat_call_answered',
+      `tool_call_id=${assistant.tool_calls?.[0]?.id}`)
+    assert(body.messages[2]?.role === 'tool', `expected kept tool message, got ${body.messages[2]?.role}`)
+    assert(body.messages[3]?.role === 'user', `expected next user message, got ${body.messages[3]?.role}`)
+  })
+  test('copilot removes unanswered tool_calls and orphan tool messages', () => {
+    const body = mkBody('claude-sonnet-4.5', {
+      messages: [
+        { role: 'user', content: 'start' },
+        {
+          role: 'assistant',
+          content: null,
+          tool_calls: [
+            mkToolCall('toolu_compat_call_missing_a', 'Read'),
+            mkToolCall('toolu_compat_call_missing_b', 'Grep'),
+          ],
+        },
+        { role: 'user', content: 'continue' },
+        { role: 'tool', tool_call_id: 'toolu_compat_call_missing_a', content: 'late orphan' },
+      ],
+    })
+
+    TRANSFORMERS.copilot.transformRequest(body, mkCtx('claude-sonnet-4.5'))
+
+    const assistant = body.messages[1]
+    assert(body.messages.length === 3, `messages=${JSON.stringify(body.messages)}`)
+    assert(assistant?.role === 'assistant', `assistant role=${assistant?.role}`)
+    assert(assistant.tool_calls === undefined, `tool_calls=${JSON.stringify(assistant.tool_calls)}`)
+    assert(assistant.content === '', `assistant content=${JSON.stringify(assistant.content)}`)
+    assert(!body.messages.some(message => message.role === 'tool'), `orphan tool message was kept`)
+  })
+  test('openrouter does not run copilot tool-call repair', () => {
+    const body = mkBody('anthropic/claude-sonnet-4-5', {
+      messages: [
+        { role: 'user', content: 'start' },
+        {
+          role: 'assistant',
+          content: null,
+          tool_calls: [mkToolCall('toolu_compat_call_missing', 'Read')],
+        },
+        { role: 'user', content: 'continue' },
+      ],
+    })
+
+    TRANSFORMERS.openrouter.transformRequest(body, mkCtx('anthropic/claude-sonnet-4-5'))
+
+    assert(body.messages[1]?.tool_calls?.length === 1,
+      `openrouter tool_calls=${JSON.stringify(body.messages[1]?.tool_calls)}`)
   })
 
   // ── Edit-format resolver + tool-set selection ───────────────────

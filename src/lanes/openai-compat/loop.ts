@@ -238,7 +238,7 @@ export class OpenAICompatLane implements Lane {
   async *streamAsProvider(
     params: LaneProviderCallParams,
   ): AsyncGenerator<AnthropicStreamEvent, NormalizedUsage> {
-    const { model, messages, system, tools, max_tokens, thinking, temperature, stop_sequences, signal, providerHint } = params
+    const { model, messages, system, tools, max_tokens, thinking, temperature, stop_sequences, signal, sessionId, providerHint } = params
 
     const cfg = this.getConfigForModel(model, providerHint)
     if (!cfg) {
@@ -247,6 +247,7 @@ export class OpenAICompatLane implements Lane {
 
     const provider = cfg.provider
     const isLocal = isLocalBaseUrl(cfg.baseUrl)
+    const cacheSessionId = provider === 'copilot' ? sessionId : undefined
 
     // Assemble system text. We keep it simple for Phase-1 (caller's text).
     const rawSystemText = typeof system === 'string'
@@ -307,6 +308,7 @@ export class OpenAICompatLane implements Lane {
       },
       provider,
       thinking,
+      cacheSessionId,
     )
 
     // Ollama branch: skip the OpenAI-compat /v1 path entirely and use
@@ -321,7 +323,7 @@ export class OpenAICompatLane implements Lane {
     }
 
     // Headers per-provider.
-    const headers = buildRequestHeaders(provider, cfg.apiKey)
+    const headers = buildRequestHeaders(provider, cfg.apiKey, model, cacheSessionId)
 
     // Fire request.
     const url = normalizeBaseUrl(cfg.baseUrl) + '/chat/completions'
@@ -330,8 +332,14 @@ export class OpenAICompatLane implements Lane {
     let messageStartEmitted = false
     let inputTokens = 0
     let outputTokens = 0
-    let cachedInputTokens = 0
+    let reportedCachedInputTokens = 0
+    let cacheWriteTokens = 0
     let reasoningTokens = 0
+
+    const cacheReadTokens = () =>
+      cacheWriteTokens > 0
+        ? Math.max(0, reportedCachedInputTokens - cacheWriteTokens)
+        : reportedCachedInputTokens
 
     // Content-block state.
     let currentBlockIndex = 0
@@ -356,10 +364,8 @@ export class OpenAICompatLane implements Lane {
           usage: {
             input_tokens: inputTokens,
             output_tokens: 0,
-            ...(cachedInputTokens > 0 && {
-              cache_read_input_tokens: cachedInputTokens,
-              cache_creation_input_tokens: 0,
-            }),
+            ...(cacheReadTokens() > 0 && { cache_read_input_tokens: cacheReadTokens() }),
+            ...(cacheWriteTokens > 0 && { cache_creation_input_tokens: cacheWriteTokens }),
           },
         },
       }
@@ -381,7 +387,7 @@ export class OpenAICompatLane implements Lane {
       yield* emitErrorText(`${provider} API connection error: ${err?.message ?? String(err)}`)
       yield { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: outputTokens } }
       yield { type: 'message_stop' }
-      return blankUsage(inputTokens, outputTokens, cachedInputTokens, reasoningTokens)
+      return blankUsage(inputTokens, outputTokens, cacheReadTokens(), reasoningTokens)
     }
 
     if (!response.ok) {
@@ -403,14 +409,14 @@ export class OpenAICompatLane implements Lane {
         yield* emitErrorText(formatCopilotModelUnsupportedMessage(model))
         yield { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: outputTokens } }
         yield { type: 'message_stop' }
-        return blankUsage(inputTokens, outputTokens, cachedInputTokens, reasoningTokens)
+        return blankUsage(inputTokens, outputTokens, cacheReadTokens(), reasoningTokens)
       }
 
       if (isCopilotQuotaExceeded) {
         yield* emitErrorText(formatCopilotQuotaExceededMessage())
         yield { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: outputTokens } }
         yield { type: 'message_stop' }
-        return blankUsage(inputTokens, outputTokens, cachedInputTokens, reasoningTokens)
+        return blankUsage(inputTokens, outputTokens, cacheReadTokens(), reasoningTokens)
       }
 
       // Detect prompt-too-long / context-window-exceeded per the
@@ -428,7 +434,7 @@ export class OpenAICompatLane implements Lane {
       yield* emitErrorText(`${headline}: ${errText.slice(0, 500)}`)
       yield { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: outputTokens } }
       yield { type: 'message_stop' }
-      return blankUsage(inputTokens, outputTokens, cachedInputTokens, reasoningTokens)
+      return blankUsage(inputTokens, outputTokens, cacheReadTokens(), reasoningTokens)
     }
 
     if (!response.body) {
@@ -469,7 +475,17 @@ export class OpenAICompatLane implements Lane {
           if (chunk.usage) {
             inputTokens = chunk.usage.prompt_tokens ?? inputTokens
             outputTokens = chunk.usage.completion_tokens ?? outputTokens
-            cachedInputTokens = chunk.usage.prompt_tokens_details?.cached_tokens ?? cachedInputTokens
+            reportedCachedInputTokens =
+              chunk.usage.prompt_tokens_details?.cached_tokens
+              ?? chunk.usage.prompt_cache_hit_tokens
+              ?? reportedCachedInputTokens
+            cacheWriteTokens = provider === 'copilot'
+              ? (
+                  chunk.usage.prompt_tokens_details?.cache_write_tokens
+                  ?? chunk.usage.cache_write_tokens
+                  ?? cacheWriteTokens
+                )
+              : 0
             reasoningTokens = chunk.usage.completion_tokens_details?.reasoning_tokens ?? reasoningTokens
           }
 
@@ -628,11 +644,9 @@ export class OpenAICompatLane implements Lane {
         output_tokens: outputTokens,
         // OpenAI-style `prompt_tokens` is total (fresh + cached). Split
         // into fresh + cache_read to match Anthropic's additive buckets.
-        input_tokens: Math.max(0, inputTokens - cachedInputTokens),
-        ...(cachedInputTokens > 0 && {
-          cache_read_input_tokens: cachedInputTokens,
-          cache_creation_input_tokens: 0,
-        }),
+        input_tokens: Math.max(0, inputTokens - cacheReadTokens() - cacheWriteTokens),
+        ...(cacheReadTokens() > 0 && { cache_read_input_tokens: cacheReadTokens() }),
+        ...(cacheWriteTokens > 0 && { cache_creation_input_tokens: cacheWriteTokens }),
       },
     }
     yield { type: 'message_stop' }
@@ -640,8 +654,8 @@ export class OpenAICompatLane implements Lane {
     return {
       input_tokens: inputTokens,
       output_tokens: outputTokens,
-      cache_read_tokens: cachedInputTokens,
-      cache_write_tokens: 0,
+      cache_read_tokens: cacheReadTokens(),
+      cache_write_tokens: cacheWriteTokens,
       thinking_tokens: reasoningTokens,
     }
   }
@@ -804,7 +818,12 @@ function normalizeBaseUrl(baseUrl: string): string {
   return baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl
 }
 
-function buildRequestHeaders(provider: ProviderType, apiKey: string): Record<string, string> {
+function buildRequestHeaders(
+  provider: ProviderType,
+  apiKey: string,
+  model: string,
+  sessionId?: string,
+): Record<string, string> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     'Accept': 'text/event-stream',
@@ -814,7 +833,7 @@ function buildRequestHeaders(provider: ProviderType, apiKey: string): Record<str
   // HTTP-Referer) to the transformer. Adding a new provider = one
   // buildHeaders() method in its transformer file.
   const transformer = getTransformer(provider as ProviderId)
-  const extra = transformer.buildHeaders?.(apiKey) ?? {}
+  const extra = transformer.buildHeaders?.(apiKey, { model, sessionId }) ?? {}
   for (const [k, v] of Object.entries(extra)) headers[k] = v
   return headers
 }
@@ -841,6 +860,7 @@ function applyProviderRequestQuirks(
   body: OpenAIChatRequest,
   provider: ProviderType,
   thinking: LaneProviderCallParams['thinking'] | undefined,
+  sessionId?: string,
 ): OpenAIChatRequest {
   const transformer = getTransformer(provider as ProviderId)
   const isReasoning = !!(thinking && thinking.type !== 'disabled')
@@ -871,6 +891,7 @@ function applyProviderRequestQuirks(
     model: body.model,
     isReasoning,
     reasoningEffort: effort,
+    sessionId,
   })
 
   // Groq rejects null-valued `function_call` on assistant messages;
