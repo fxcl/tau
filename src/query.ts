@@ -82,6 +82,22 @@ import {
   getRuntimeMainLoopModel,
   renderModelName,
 } from './utils/model/model.js'
+import { applyFallbackTargetToRuntime } from './utils/fallback/apply.js'
+import {
+  clearFallbackProcess,
+  formatFallbackTarget,
+  getActiveFallbackAttempt,
+  getConfiguredFallbackTargets,
+  getNextFallbackAttempt,
+  requestFallbackConfirmation,
+  type FallbackAttempt,
+} from './utils/fallback/state.js'
+import {
+  getAssistantAPIErrorText,
+  isFallbackEligibleAPIErrorMessage,
+  isFallbackEligibleThrownError,
+  truncateFallbackErrorMessage,
+} from './utils/fallback/detect.js'
 import {
   doesMostRecentAssistantMessageExceed200k,
   finalContextTokensFromLastResponse,
@@ -304,6 +320,12 @@ async function* queryLoop(
     state.toolUseContext,
   )
 
+  // Wrap the loop so the configured-fallback rotation state is always
+  // cleared on exit (return, throw, or .return() from the SDK consumer).
+  // Pending /fallback confirmations live longer — they're consumed by the
+  // user's next /fallback yes|no, possibly across query() calls — so they
+  // are NOT cleared here; only the active rotation chain is reset.
+  try {
   // eslint-disable-next-line no-constant-condition
   while (true) {
     // Destructure state at the top of each iteration. toolUseContext alone
@@ -577,6 +599,138 @@ async function* queryLoop(
         permissionMode === 'plan' &&
         doesMostRecentAssistantMessageExceed200k(messagesForQuery),
     })
+    let currentEffortValue = appState.effortValue
+
+    // Configured /fallback chain. Only honored on the interactive REPL main
+    // thread — subagents and SDK callers can't respond to /fallback yes/no
+    // so silently surface the underlying error there instead of stalling.
+    const fallbackTargets = getConfiguredFallbackTargets()
+    const fallbackAllowed =
+      fallbackTargets.length > 0 &&
+      !toolUseContext.agentId &&
+      !toolUseContext.options.isNonInteractiveSession &&
+      querySource.startsWith('repl_main_thread')
+
+    // If the user already approved /fallback yes, the active attempt was set
+    // before this query() began. Apply it again here as belt-and-suspenders —
+    // the FallbackContinueRunner already wrote runtime+appState, but in-flight
+    // races (e.g. a subagent setting active state mid-render) shouldn't slip
+    // past the model swap.
+    const activeFallbackOnEntry = getActiveFallbackAttempt()
+    if (fallbackAllowed && activeFallbackOnEntry) {
+      const effort = applyFallbackTargetToRuntime(activeFallbackOnEntry.target)
+      currentModel = activeFallbackOnEntry.target.model
+      toolUseContext.options.mainLoopModel = activeFallbackOnEntry.target.model
+      if (effort !== undefined) {
+        currentEffortValue = effort
+      }
+      if (activeFallbackOnEntry.target.provider === 'firstParty') {
+        messagesForQuery = stripSignatureBlocks(messagesForQuery)
+      }
+    }
+
+    // Apply a fallback target as the new live model and return the system
+    // message describing the swap. Mutates currentModel/currentEffortValue/
+    // messagesForQuery via closure so the post-continue iteration picks up
+    // the new model. setAppState keeps the React UI (and the next user
+    // prompt) in sync with the swap.
+    const applyFallbackAttempt = (attempt: FallbackAttempt): string => {
+      const originalProvider = getAPIProvider()
+      const originalModel = currentModel
+      const effort = applyFallbackTargetToRuntime(attempt.target)
+
+      currentModel = attempt.target.model
+      toolUseContext.options.mainLoopModel = attempt.target.model
+      if (effort !== undefined) {
+        currentEffortValue = effort
+      }
+      if (attempt.target.provider === 'firstParty') {
+        messagesForQuery = stripSignatureBlocks(messagesForQuery)
+      }
+
+      toolUseContext.setAppState(prev => ({
+        ...prev,
+        mainLoopModel: attempt.target.model,
+        mainLoopModelForSession: null,
+        ...(effort !== undefined ? { effortValue: effort } : {}),
+      }))
+
+      logEvent('tengu_model_fallback_triggered', {
+        original_model:
+          `${originalProvider}/${originalModel}` as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+        fallback_model:
+          `${attempt.target.provider}/${attempt.target.model}` as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+        entrypoint:
+          'cli' as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+        queryChainId: queryChainIdForAnalytics,
+        queryDepth: queryTracking.depth,
+      })
+
+      return `Fallback ${attempt.index + 1}/${attempt.total}: switched to ${formatFallbackTarget(attempt.target)} after ${renderModelName(originalModel)} failed.`
+    }
+
+    type FallbackAction =
+      | { type: 'retry'; systemMessage: string }
+      | { type: 'confirm'; systemMessage: string; error: Error }
+      | { type: 'none' }
+
+    // Decide what to do with a fallback-eligible error: auto-rotate to the
+    // next attempt if we're already mid-chain, ask the user to confirm if
+    // we're not, or do nothing if /fallback isn't configured for this run.
+    const decideFallbackAction = (errorText: string): FallbackAction => {
+      if (!fallbackAllowed) {
+        return { type: 'none' }
+      }
+
+      if (getActiveFallbackAttempt()) {
+        const next = getNextFallbackAttempt()
+        if (next) {
+          return { type: 'retry', systemMessage: applyFallbackAttempt(next) }
+        }
+        clearFallbackProcess()
+        return { type: 'none' }
+      }
+
+      const truncated = truncateFallbackErrorMessage(errorText)
+      requestFallbackConfirmation({
+        originalProvider: getAPIProvider(),
+        originalModel: currentModel,
+        errorMessage: truncated,
+      })
+
+      const targets = getConfiguredFallbackTargets()
+      const lines = [
+        `Model failed on ${getAPIProvider()}/${currentModel}: ${truncated}`,
+        'Complete this work with fallback models?',
+        '',
+        'Fallback priority:',
+        ...targets.map(
+          (target, index) =>
+            `  ${index + 1}. ${formatFallbackTarget(target)}`,
+        ),
+        '',
+        'Run /fallback yes to continue or /fallback no to cancel.',
+      ]
+
+      return {
+        type: 'confirm',
+        systemMessage: lines.join('\n'),
+        error: new Error(errorText),
+      }
+    }
+
+    const buildFallbackRetryState = (): State => ({
+      messages: messagesForQuery,
+      toolUseContext,
+      autoCompactTracking: tracking,
+      maxOutputTokensRecoveryCount,
+      hasAttemptedReactiveCompact,
+      maxOutputTokensOverride,
+      pendingToolUseSummary: undefined,
+      stopHookActive,
+      turnCount,
+      transition: undefined,
+    })
 
     queryCheckpoint('query_setup_end')
 
@@ -692,7 +846,7 @@ async function* queryLoop(
                 c => c.type === 'pending',
               ),
               queryTracking,
-              effortValue: appState.effortValue,
+              effortValue: currentEffortValue,
               advisorModel: appState.advisorModel,
               skipCacheWrite,
               agentId: toolUseContext.agentId,
@@ -819,6 +973,17 @@ async function* queryLoop(
               withheld = true
             }
             if (isWithheldMaxOutputTokens(message)) {
+              withheld = true
+            }
+            // Withhold quota / 5xx errors so the user sees the fallback
+            // confirmation banner (or the auto-rotation system message)
+            // instead of the raw error first. The error itself is preserved
+            // in `assistantMessages` for the post-stream handler to inspect.
+            if (
+              fallbackAllowed &&
+              message.type === 'assistant' &&
+              isFallbackEligibleAPIErrorMessage(message)
+            ) {
               withheld = true
             }
             if (!withheld) {
@@ -986,6 +1151,33 @@ async function* queryLoop(
           content: error.message,
         })
         return { reason: 'image_error' }
+      }
+
+      // Configured /fallback chain: if the thrown error is a quota / 5xx
+      // server error AND we're on the interactive REPL, redirect through the
+      // configured fallback chain instead of surfacing the raw error.
+      if (
+        !toolUseContext.abortController.signal.aborted &&
+        isFallbackEligibleThrownError(error)
+      ) {
+        const action = decideFallbackAction(errorMessage)
+        if (action.type === 'retry') {
+          yield* yieldMissingToolResultBlocks(
+            assistantMessages,
+            'Model fallback triggered',
+          )
+          yield createSystemMessage(action.systemMessage, 'warning')
+          state = buildFallbackRetryState()
+          continue
+        }
+        if (action.type === 'confirm') {
+          yield* yieldMissingToolResultBlocks(
+            assistantMessages,
+            'Model fallback pending confirmation',
+          )
+          yield createSystemMessage(action.systemMessage, 'warning')
+          return { reason: 'model_error', error: action.error }
+        }
       }
 
       // Generally queryModelWithStreaming should not throw errors but instead
@@ -1271,6 +1463,38 @@ async function* queryLoop(
       // real response — hooks evaluating it create a death spiral:
       // error → hook blocking → retry → error → …
       if (lastMessage?.isApiErrorMessage) {
+        // Configured /fallback chain: only quota and server-side errors
+        // route through fallback (see isFallbackEligibleAPIErrorMessage).
+        // Anything else (auth, invalid_request, prompt_too_long, image
+        // errors, etc.) falls through to the normal stop-hook + return path.
+        if (
+          fallbackAllowed &&
+          isFallbackEligibleAPIErrorMessage(lastMessage)
+        ) {
+          const errorText = getAssistantAPIErrorText(lastMessage)
+          const action = decideFallbackAction(errorText)
+          if (action.type === 'retry') {
+            yield* yieldMissingToolResultBlocks(
+              assistantMessages,
+              'Model fallback triggered',
+            )
+            yield createSystemMessage(action.systemMessage, 'warning')
+            state = buildFallbackRetryState()
+            continue
+          }
+          if (action.type === 'confirm') {
+            yield* yieldMissingToolResultBlocks(
+              assistantMessages,
+              'Model fallback pending confirmation',
+            )
+            yield createSystemMessage(action.systemMessage, 'warning')
+            return { reason: 'model_error', error: action.error }
+          }
+          // type === 'none' — chain exhausted or disallowed mid-flight.
+          // The streaming loop withheld this error from the SDK; surface
+          // it now so callers see what actually failed.
+          yield lastMessage
+        }
         void executeStopFailureHooks(lastMessage, toolUseContext)
         return { reason: 'completed' }
       }
@@ -1737,4 +1961,7 @@ async function* queryLoop(
     }
     state = next
   } // while (true)
+  } finally {
+    clearFallbackProcess()
+  }
 }
