@@ -50,7 +50,7 @@ claudex update
 ```
 
 ---
-## The Four Commands You Need to Know
+## The Commands You Need to Know
 
 ### `/login` — Start here
 
@@ -64,15 +64,16 @@ Shows every connected provider and their current status. Configured, available, 
 
 Live model browser. Fetches the actual catalog from your provider's API in real time. Search, filter, and set any model as your active one.
 
-**`/fallback`** — Automatic recovery when a model fails mid-session. Configure a fallback and never lose your work to a provider outage again.
-
-
 ```
 /models                     open the full picker
 /models <query>             search active provider
 /models openrouter:kimi     search a specific provider
 /model kimi-k2-5            set a model directly
 ```
+
+### `/fallback` — Recover automatically
+
+Automatic recovery when a model fails mid-session. Configure a fallback and never lose your work to a provider outage again.
 
 ### `/usage` — Watch the meter
 
