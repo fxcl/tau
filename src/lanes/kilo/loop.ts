@@ -65,6 +65,12 @@ import {
   KILO_FALLBACK_MODELS,
   KILO_FALLBACK_FREE_IDS,
 } from './catalog.js'
+import {
+  kiloToolCallKey,
+  normalizeKiloToolCallArgumentString,
+  parseKiloToolCallKey,
+  tryNormalizeKiloToolCallArgumentString,
+} from './tool_args.js'
 
 const KILO_API_BASE = 'https://api.kilo.ai'
 const KILO_MODEL_LIST_LIMIT = 40
@@ -76,6 +82,15 @@ const KILO_CONTEXT_EXCEEDED_MARKERS = [
   'maximum context',
   'too long',
 ]
+
+const KILO_TOOL_USAGE_RULES = `${OPENAI_COMPAT_TOOL_USAGE_RULES}
+<kilocode_tool_quirks>
+KiloCode must call the tools using the schema names shown in this session, not aliases remembered from other coding CLIs:
+- AskUserQuestion.questions must be an array of question objects, not a JSON string.
+- Edit, Read, and Write use file_path for the file path.
+- TaskGet.taskId must come from a current TaskList or TaskCreate result; do not guess stale task IDs.
+</kilocode_tool_quirks>
+`
 
 /** `X-KILOCODE-EDITORNAME` — matches Kilo CLI's DEFAULT_EDITOR_NAME path. */
 const KILO_EDITOR_NAME = 'ClaudeX'
@@ -461,18 +476,18 @@ export class KiloLane implements Lane {
     if (!hasTools) return system
     if (typeof system === 'string') {
       return system
-        ? `${OPENAI_COMPAT_TOOL_USAGE_RULES}\n${system}`
-        : OPENAI_COMPAT_TOOL_USAGE_RULES
+        ? `${KILO_TOOL_USAGE_RULES}\n${system}`
+        : KILO_TOOL_USAGE_RULES
     }
 
     const blocks = [...system]
     if (blocks.length === 0) {
-      return [{ type: 'text', text: OPENAI_COMPAT_TOOL_USAGE_RULES }]
+      return [{ type: 'text', text: KILO_TOOL_USAGE_RULES }]
     }
 
     const first = blocks[0] as SystemBlock & { cache_control?: { type: string } }
     return [
-      { ...first, text: `${OPENAI_COMPAT_TOOL_USAGE_RULES}\n${first.text}` },
+      { ...first, text: `${KILO_TOOL_USAGE_RULES}\n${first.text}` },
       ...blocks.slice(1),
     ]
   }
@@ -648,17 +663,73 @@ export class KiloLane implements Lane {
   private async *_normalizeChunkStream(
     chunks: AsyncIterable<OpenAIChatCompletionChunk>,
   ): AsyncGenerator<OpenAIChatCompletionChunk> {
+    const pendingToolArgs = new Map<string, { name: string; args: string }>()
+
     for await (const chunk of chunks) {
       const choices = Array.isArray(chunk.choices)
         ? chunk.choices.map((choice) => {
           const delta = { ...(choice.delta ?? {}) } as OpenAIChatCompletionChunk['choices'][number]['delta'] & {
             reasoning?: string
           }
+          const choiceIndex = typeof choice.index === 'number' ? choice.index : 0
+
           // OpenRouter-flavoured `delta.reasoning` → normalize to
           // `reasoning_content` so openAIStreamToAnthropicEvents picks it up.
           if (typeof delta.reasoning === 'string' && !delta.reasoning_content) {
             delta.reasoning_content = delta.reasoning
           }
+
+          if (Array.isArray(delta.tool_calls)) {
+            delta.tool_calls = delta.tool_calls.map((toolCall) => {
+              const toolIndex = toolCall.index ?? 0
+              const key = kiloToolCallKey(choiceIndex, toolIndex)
+              const pending = pendingToolArgs.get(key) ?? { name: '', args: '' }
+              const fn = toolCall.function ? { ...toolCall.function } : undefined
+
+              if (fn?.name) pending.name = fn.name
+              if (typeof fn?.arguments === 'string' && fn.arguments.length > 0) {
+                pending.args += fn.arguments
+                pendingToolArgs.set(key, pending)
+
+                const normalized = pending.name
+                  ? tryNormalizeKiloToolCallArgumentString(
+                      pending.name,
+                      pending.args,
+                    )
+                  : null
+                if (normalized !== null) {
+                  fn.arguments = normalized
+                  pendingToolArgs.delete(key)
+                } else {
+                  delete fn.arguments
+                }
+              }
+
+              return fn ? { ...toolCall, function: fn } : toolCall
+            })
+          }
+
+          if (choice.finish_reason) {
+            const injected: NonNullable<typeof delta.tool_calls> = []
+            for (const [key, pending] of Array.from(pendingToolArgs.entries())) {
+              const parsed = parseKiloToolCallKey(key)
+              if (!parsed || parsed.choiceIndex !== choiceIndex) continue
+              injected.push({
+                index: parsed.toolIndex,
+                function: {
+                  arguments: normalizeKiloToolCallArgumentString(
+                    pending.name,
+                    pending.args,
+                  ),
+                },
+              })
+              pendingToolArgs.delete(key)
+            }
+            if (injected.length > 0) {
+              delta.tool_calls = [...(delta.tool_calls ?? []), ...injected]
+            }
+          }
+
           return { ...choice, delta }
         })
         : chunk.choices
