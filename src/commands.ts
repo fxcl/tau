@@ -133,10 +133,12 @@ import privacySettings from './commands/privacy-settings/index.js'
 import hooks from './commands/hooks/index.js'
 import files from './commands/files/index.js'
 import branch from './commands/branch/index.js'
+import clone from './commands/clone/index.js'
 import agents from './commands/agents/index.js'
 import plugin from './commands/plugin/index.js'
 import reloadPlugins from './commands/reload-plugins/index.js'
 import rewind from './commands/rewind/index.js'
+import tree from './commands/tree/index.js'
 import heapDump from './commands/heapdump/index.js'
 import mockLimits from './commands/mock-limits/index.js'
 import bridgeKick from './commands/bridge-kick.js'
@@ -174,6 +176,7 @@ import { isFirstPartyAnthropicBaseUrl } from './utils/model/providers.js'
 import env from './commands/env/index.js'
 import exit from './commands/exit/index.js'
 import exportCommand from './commands/export/index.js'
+import importCmd from './commands/import/index.js'
 import fallback from './commands/fallback/index.js'
 import model from './commands/model/index.js'
 import models from './commands/models/index.js'
@@ -266,6 +269,7 @@ const COMMANDS = memoize((): Command[] => [
   advisor,
   agents,
   branch,
+  clone,
   btw,
   chrome,
   clear,
@@ -318,6 +322,7 @@ const COMMANDS = memoize((): Command[] => [
   review,
   ultrareview,
   rewind,
+  tree,
   securityReview,
   terminalSetup,
   upgrade,
@@ -343,6 +348,7 @@ const COMMANDS = memoize((): Command[] => [
   privacySettings,
   hooks,
   exportCommand,
+  importCmd,
   sandboxToggle,
   logout, login(), provider, lane,
   passes,
