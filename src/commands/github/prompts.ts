@@ -20,6 +20,8 @@ export const ALLOWED_TOOLS = [
   'Bash(gh release:*)',
   'Bash(gh release create:*)',
   'Bash(gh release view:*)',
+  'Bash(gh run:*)',
+  'Bash(gh run list:*)',
   'Bash(gh api:*)',
   'Bash(gh workflow:*)',
   'Bash(gh workflow run:*)',
@@ -71,7 +73,7 @@ Run \`/github\` with no arguments to open the interactive picker, or pass a subc
 - \`/github wrap [--branch=<name>] [--issue=<n>] [instructions]\` — commit, push, optionally close an issue, update changelog
 - \`/github changelog\` — audit git history since last release and draft changelog notes
 - \`/github triage\` — label, deduplicate, and assign open issues
-- \`/github release <version>\` — bundle changelog, tag, push, publish a GitHub release, trigger deployment
+- \`/github release <version>\` — publish the green Latest release: tag, title, workflow, concise notes
 
 Example:
 - \`/github issue https://github.com/SleepyCatHey/Ultimate-Win11-Setup/issues/11\`
@@ -415,35 +417,116 @@ NEVER auto-close, auto-assign, or auto-label without the user's explicit yes.`
 export function buildReleasePrompt(args: string): string {
   const version = args.trim().split(/\s+/)[0]
   const versionSection = version
-    ? `Target version: \`${version}\`. Validate it matches the project's tag pattern (\`vMAJOR.MINOR.PATCH\` is the most common — check existing tags with \`git tag --sort=-v:refname | head -5\`). If the format clashes, ASK the user before tagging.`
-    : `No version was supplied. Read the latest tag (\`git tag --sort=-v:refname | head -1\`), propose the next version (patch bump by default; minor if there are new features in the diff; major if there are breaking changes), and ASK the user to confirm before continuing.`
+    ? `User-supplied version: \`${version}\`. Validate it matches the project's tag pattern (\`vMAJOR.MINOR.PATCH\` is most common — check \`git tag --sort=-v:refname | head -5\`). If the format clashes, ASK before continuing.`
+    : `No version supplied. Read the latest tag (\`git tag --sort=-v:refname | head -1\`), propose the next bump (patch by default; minor if new features; major if breaking changes), and include the proposal in the Step 4 preview for the user to confirm.`
 
-  return `# /github release — launch
+  return `# /github release — tag → publish → trigger
 
 ${SAFETY_RULES}
 
+> By invoking \`/github release\`, the user has authorized the full release flow for this turn. Re-ask only at Step 4 (single confirmation gate before tag/push/publish/workflow trigger).
+
 ${versionSection}
+
+## What this command produces
+
+The whole job of \`/github release\` is to produce four concentrated, high-quality artifacts:
+1. **A new tag** — pushed to origin and marked as the green "Latest" release on GitHub.
+2. **A release title** — a one-line theme summary, NOT just the bare version.
+3. **A triggered workflow** — the release / deploy / publish workflow that auto-fires from the release, or one explicitly previewed before approval and then triggered.
+4. **A quick description** — concentrated bullets covering everything that landed between the previous release tag and this one.
+
+## Writing style — title, notes, report
+
+Every line is **concentrated** (dense, no padding) and **high quality** (specific, user-facing). Banned filler: "improved X", "various updates", "this release ...", "miscellaneous changes". Plain English, no emojis, no celebration.
 
 ## Your task
 
-Walk these steps in order. STOP at every checkpoint that says "ASK".
+### Step 1: Pre-flight
 
-1. **Pre-flight**:
-   - \`git status\` — must be clean. If dirty, STOP and tell the user.
-   - \`git branch --show-current\` — must be the project's main branch (\`main\` or \`master\`). If not, ASK before continuing.
-   - \`git fetch --tags\` then \`git pull --ff-only\` to make sure local matches remote. If the pull is not fast-forward, STOP.
-   - \`gh pr checks <main-branch>\` if the project gates releases on green CI — STOP if any required check is failing.
-2. **Build changelog notes**: same logic as \`/github changelog\` — diff against last tag, categorize, format. Hold the notes in memory; do NOT write them yet.
-3. **ASK** the user to confirm: version number, list of changes, target branch. Show the proposed notes inline. STOP and wait.
-4. **On approval**, in this exact order:
-   - Update \`CHANGELOG.md\`: move \`[Unreleased]\` content under the new version + today's date, leave a fresh empty \`[Unreleased]\` on top. Commit: \`chore(release): <version>\`.
-   - Tag: \`git tag -a <version> -m "<version>"\`.
-   - Push: \`git push origin <main-branch>\` then \`git push origin <version>\`.
-   - GitHub release: \`gh release create <version> --title "<version>" --notes-file <(printf '%s' "$NOTES")\` (or \`--notes\` with a heredoc). Mark it as latest unless the user said otherwise.
-5. **Deploy hook**: list available workflows with \`gh workflow list\`. If a release/deploy workflow exists, ASK the user "Run \`<workflow>\` against tag <version>?" before \`gh workflow run\`. Do not assume.
-6. **Report**: print the release URL (\`gh release view <version> --json url -q .url\`), the tag SHA, and the workflow run URL if you triggered one.
+- \`git status\` — must be clean. If dirty, STOP.
+- \`git branch --show-current\` — must be \`main\` / \`master\` (or the project's release branch). If not, ASK.
+- \`git fetch --tags\` then \`git pull --ff-only\`. If non-fast-forward, STOP.
+- Check release blockers: use \`gh run list --branch <branch> --limit 10 --json status,conclusion,workflowName,url\` and any repo-specific required check command. STOP if a required check is failing.
 
-If anything in steps 4–5 fails after the tag has been pushed, STOP and surface the exact error — do NOT try to clean up by deleting the tag without asking.`
+### Step 2: Find the boundary
+
+- Last release tag: \`gh release view --json tagName -q .tagName 2>/dev/null || git describe --tags --abbrev=0\`.
+- Resolve the new version (use user input above; otherwise compute the next bump).
+- Discover the workflow artifact before the preview:
+  - \`gh workflow list\` to find obvious release/deploy/publish workflows.
+  - Inspect likely candidates with \`gh workflow view <workflow> --yaml\` if needed.
+  - If a workflow clearly triggers on \`release\`, preview it as auto-triggered.
+  - If one clear workflow supports \`workflow_dispatch\` but will not auto-trigger, preview it as a manual trigger after release creation.
+  - If none or multiple ambiguous choices exist, preview \`none selected\`; do not guess.
+
+### Step 3: Collect what's new since the last tag
+
+- \`git log <last-tag>..HEAD --no-merges --pretty=format:"%H|%s"\`. For ambiguous subjects, run \`git show --stat <sha>\` to infer.
+- Categorize each commit (Keep-a-Changelog headings):
+  - **Added** — new features
+  - **Changed** — enhancements to existing features
+  - **Fixed** — bug fixes
+  - **Removed** — deletions
+  - **Security** — security-relevant fixes
+- Combine related commits into ONE concentrated bullet. Skip pure tooling/internal noise unless it ships a user-facing benefit.
+
+### Step 4: Preview and ASK (single confirmation gate)
+
+Show the user EXACTLY this block, then ask "Publish?" — STOP and wait:
+
+\`\`\`
+Tag:      <version>          ← will be marked as the green "Latest" release on GitHub
+Title:    <release title>    ← one-line theme of the release, NOT just the version
+Workflow: <workflow plan>    ← auto-triggered by release | manual trigger after release | none selected
+Notes:
+  ## Added
+  - <concentrated bullet>
+  ## Changed
+  - <concentrated bullet>
+  ## Fixed
+  - <concentrated bullet>
+\`\`\`
+
+The title summarizes the release theme in one line (e.g. \`v0.7.0 — Lane redesign + faster startup\`). If there is no clear theme, use \`<version> — <biggest change in one phrase>\`. Never just the bare version.
+
+### Step 5: Publish (only on user approval)
+
+Run in this exact order. STOP at the FIRST failure and surface the error verbatim:
+1. **Changelog** — if \`CHANGELOG.md\` exists at repo root: move \`[Unreleased]\` content under \`## [<version>] - <YYYY-MM-DD>\`, leave a fresh empty \`[Unreleased]\` at the top. Stage + commit with a short repo-style message (e.g. \`Release <version>\`).
+2. **Tag** — \`git tag -a <version> -m "<version> — <title>"\`.
+3. **Push** — \`git push origin <branch>\` then \`git push origin <version>\`.
+4. **GitHub release** — record the current UTC time, then create with the title and notes from Step 4:
+\`\`\`
+gh release create <version> --title "<title>" --notes "$(cat <<'EOF'
+<notes body>
+EOF
+)"
+\`\`\`
+Defaults to latest = the green "Latest" badge; do NOT pass \`--latest=false\` unless the user said so.
+
+### Step 6: Triggered workflows
+
+- If Step 4 previewed a manual workflow trigger, run it now with \`gh workflow run <workflow> --ref <version>\`. Do not trigger any workflow that was not previewed before approval.
+- List runs that fired off the release or manual trigger: \`gh run list --limit 10 --json status,workflowName,url,createdAt,event,headBranch,headSha\`. Filter to runs created at or after the recorded release-create time and matching the previewed workflow plan.
+- Capture every workflow-run URL for the report.
+
+### Step 7: Report
+
+Reply with EXACTLY this block, no other prose, no congratulations:
+
+\`\`\`
+Tag:        <version>  (Latest)
+Title:      <title>
+Release:    <gh release view URL>
+Workflows:  <workflow1>: <run URL> · <workflow2>: <run URL>   |   none triggered
+What's new since <last-tag>:
+  - <Added bullet>
+  - <Changed bullet>
+  - <Fixed bullet>
+\`\`\`
+
+If anything failed AFTER the tag has been pushed, STOP and surface the error verbatim. Do NOT delete the tag without asking — that requires explicit user approval.`
 }
 
 export const SUBCOMMANDS: Record<string, (args: string) => string> = {
