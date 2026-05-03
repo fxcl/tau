@@ -50,6 +50,7 @@ export const ALLOWED_TOOLS = [
   'Write',
   'Glob',
   'Grep',
+  'WebFetch',
 ]
 
 const SAFETY_RULES = `## GitHub Safety Protocol
@@ -65,7 +66,7 @@ export const HELP_TEXT = `# /github — full repo manager
 
 Run \`/github\` with no arguments to open the interactive picker, or pass a subcommand directly:
 
-- \`/github issue <url|#number>\` — investigate an issue, propose a fix, label it in-progress (does NOT change code without confirmation)
+- \`/github issue <url|#number>\` — describe an issue and (for #number) propose a fix; labels it only if you have write access (does NOT change code without confirmation)
 - \`/github pr <url|#number>\` — review a pull request and surface the Good / Bad / Ugly
 - \`/github wrap [--branch=<name>] [--issue=<n>] [instructions]\` — commit, push, optionally close an issue, update changelog
 - \`/github changelog\` — audit git history since last release and draft changelog notes
@@ -82,6 +83,7 @@ Example:
 function parseIssueOrPrTarget(raw: string): {
   display: string
   parsedHint: string
+  isUrl: boolean
 } {
   const trimmed = raw.trim()
   if (!trimmed) {
@@ -89,6 +91,7 @@ function parseIssueOrPrTarget(raw: string): {
       display: '<none provided>',
       parsedHint:
         'No target was supplied. Tell the user the command needs a URL or a number, then stop.',
+      isUrl: false,
     }
   }
   const urlMatch = trimmed.match(
@@ -104,6 +107,7 @@ function parseIssueOrPrTarget(raw: string): {
 - kind: \`${kind}\`
 - number: \`${num}\`
 Use \`--repo ${owner}/${repo}\` on every \`gh\` call. Do NOT assume the current repo.`,
+      isUrl: true,
     }
   }
   if (/^#?\d+$/.test(trimmed)) {
@@ -111,16 +115,38 @@ Use \`--repo ${owner}/${repo}\` on every \`gh\` call. Do NOT assume the current 
     return {
       display: `#${num}`,
       parsedHint: `The user supplied just a number (\`${num}\`). Resolve it against the current repo (run \`gh repo view --json nameWithOwner -q .nameWithOwner\` once if you need the slug). Do NOT pass \`--repo\` unless the lookup fails.`,
+      isUrl: false,
     }
   }
   return {
     display: trimmed,
     parsedHint: `The argument did not parse as a URL or number. Show the user this help text:\n\n  Usage: <subcommand> <github-url> | <number>\n\nThen stop.`,
+    isUrl: false,
   }
 }
 
 export function buildIssuePrompt(args: string): string {
-  const { display, parsedHint } = parseIssueOrPrTarget(args)
+  const { display, parsedHint, isUrl } = parseIssueOrPrTarget(args)
+
+  const finalSection = isUrl
+    ? `### Step 5: Stop here
+
+The user supplied a URL — the issue may live in a repo other than this checkout, so the source code is not necessarily available. Do NOT \`Grep\`/\`Glob\`/\`Read\` source files and do NOT propose a code fix.
+
+End your reply with the description from Step 4 plus this note: "Issue referenced by URL — open the repo locally if you want a code-level investigation." Then STOP.`
+    : `### Step 5: Investigate and propose a fix
+
+The user supplied a number — the issue lives in this checkout's repo, so the source is available.
+
+1. Use \`Grep\`/\`Glob\`/\`Read\` (and \`git log\` / \`git blame\` when ownership matters) to locate the affected code paths. Cite \`file:line\` for every claim.
+2. Form a hypothesis for the root cause and a small, concrete fix. No unrelated cleanup.
+3. After the description from Step 4, add:
+   - **Root cause:** the file/function and why it fails.
+   - **Proposed fix:** the concrete change (a few lines or a short patch sketch).
+   - **Question:** "Apply this fix now?" — and STOP.
+
+DO NOT modify code, open a PR, or push anything until the user replies "yes" / "go ahead". Only the labels (when permission allowed it in Step 3) happened automatically.`
+
   return `# /github issue — investigate
 
 User target: \`${display}\`
@@ -131,18 +157,49 @@ ${SAFETY_RULES}
 
 ## Your task
 
-1. Read the issue: \`gh issue view <number> [--repo <owner/repo>] --comments\`. Capture the body, labels, assignees, state, and every comment.
-2. If the issue is already closed, tell the user and stop — do not relabel a closed issue.
-3. Identify the affected area in this checkout. Use \`Grep\`/\`Glob\`/\`Read\` (and \`git log\` / \`git blame\` when ownership matters) to find the code paths the bug actually lives in. Cite \`file:line\` for every claim.
-4. Form a hypothesis for the root cause and a concrete fix. Keep it small — do not propose unrelated cleanup.
-5. Add the \`in progress\` label so teammates know it is taken. If that label does not exist, create it once with \`gh label create "in progress" --color FBCA04 --description "Being actively worked on"\`, then apply it. Do NOT assign anyone, do NOT close the issue.
-6. Reply to the user with:
-   - **Summary:** one sentence on what's broken.
-   - **Root cause:** the file/function and why it fails.
-   - **Proposed fix:** the concrete change (a few lines or a short patch sketch).
-   - **Question:** "Apply this fix now?" — and STOP.
+Run these steps in order. Do NOT skip ahead. The whole point of the ordering is to avoid \`gh\` commands that will fail visibly — diagnose first, act only when safe.
 
-DO NOT modify code, open a PR, or push anything until the user replies "yes" / "go ahead". Only the label change happens automatically.`
+### Step 1: Read the issue
+
+1. Resolve the target repo:
+   - URL target → use the \`<owner>/<repo>\` from the parsed hint above; pass \`--repo <owner>/<repo>\` on every \`gh\` call.
+   - Number target → resolve current repo once: \`gh repo view --json nameWithOwner -q .nameWithOwner\`.
+2. Fetch the issue:
+   \`gh issue view <number> [--repo <owner/repo>] --json number,title,body,state,labels,assignees,author,comments\`
+3. If \`state\` is \`CLOSED\`, tell the user the issue is already closed and STOP — do not relabel it.
+
+### Step 2: Check write permission (silent)
+
+Run exactly one check before touching any labels:
+\`\`\`
+gh api "repos/<owner>/<repo>" --jq '.permissions.push // false' 2>/dev/null || echo false
+\`\`\`
+- Output \`true\` → you have write access (author / collaborator / maintainer) → proceed to Step 3.
+- Output \`false\` or empty → you do NOT have write access → SKIP Step 3 entirely and jump straight to Step 4. Do NOT attempt \`gh issue edit\`, \`gh label create\`, or any label-mutating call — they would fail and clutter the output.
+
+### Step 3: Apply labels by category and criticality (only if Step 2 returned \`true\`)
+
+1. List the repo's existing labels once: \`gh label list [--repo <owner/repo>] --limit 100 --json name --jq '.[].name'\`. Hold the set in memory.
+2. From the issue body, decide which labels apply — only ones already in that set:
+   - **Category** — \`bug\`, \`enhancement\`, \`documentation\`, \`question\`, or \`chore\`.
+   - **Criticality** — only if labels like \`P0\`/\`P1\`/\`P2\`, \`high priority\`, \`critical\`, \`low priority\` exist in the set. Be conservative: \`high\`/\`critical\`/\`P0\` is reserved for broken core flows, security holes, or data loss.
+   - **Status** — \`in progress\` if it exists.
+3. Apply each chosen label with:
+   \`gh issue edit <n> [--repo ...] --add-label "<name>" 2>/dev/null || true\`
+   Do NOT create new labels. If a label you wanted is missing from the set, silently skip it.
+
+### Step 4: Describe the issue (always — both URL and number paths)
+
+Read every signal attached to the issue:
+- Title, body, and every comment.
+- Image attachments — extract URLs from \`![](url)\` and \`<img src="url">\` blocks. Use the URL VERBATIM (do not append a stray \`.\`, \`,\`, \`)\`, or any trailing punctuation that markdown rendering may have left behind). Fetch each image ONCE with \`WebFetch\`. If it 404s or times out, write "attachment unavailable" and move on — never retry the same URL.
+- PDFs / file attachments linked in the body — same one-shot fetch rule.
+
+If the issue body is *only* an image and that image is unreachable, reply: "Cannot describe the issue — the only attachment is unreachable. Please paste the error text or describe the screenshot." Then STOP. Do NOT speculate about the bug.
+
+Otherwise, write a 2–4 sentence **Description** that captures: what the user is reporting, key error messages or screenshot contents, and any reproduction steps the issue mentions.
+
+${finalSection}`
 }
 
 export function buildPrPrompt(args: string): string {
