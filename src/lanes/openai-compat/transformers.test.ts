@@ -18,7 +18,7 @@
  *   - Mistral rewrites tool_choice: "required" → "any".
  *   - NIM deletes stream_options.
  *   - Ollama deletes stream_options.
- *   - OpenRouter emits HTTP-Referer + X-Title headers.
+ *   - OpenRouter emits app-attribution headers.
  *
  * Run:  bun run src/lanes/openai-compat/transformers.test.ts
  */
@@ -434,10 +434,27 @@ function main(): void {
   })
 
   // ── OpenRouter headers ──────────────────────────────────────────
-  test('openrouter builds HTTP-Referer + X-Title headers', () => {
-    const h = TRANSFORMERS.openrouter.buildHeaders?.('sk-or-v1-xxx') ?? {}
-    assert('HTTP-Referer' in h, 'HTTP-Referer header missing')
-    assert('X-Title' in h, 'X-Title header missing')
+  test('openrouter builds OpenRouter app-attribution headers', () => {
+    const oldReferer = process.env.OPENROUTER_REFERER
+    const oldTitle = process.env.OPENROUTER_TITLE
+    const oldCategories = process.env.OPENROUTER_CATEGORIES
+    delete process.env.OPENROUTER_REFERER
+    delete process.env.OPENROUTER_TITLE
+    delete process.env.OPENROUTER_CATEGORIES
+    try {
+      const h = TRANSFORMERS.openrouter.buildHeaders?.('sk-or-v1-xxx') ?? {}
+      assert(h['HTTP-Referer'] === 'https://github.com/AbdoKnbGit/tau', 'HTTP-Referer header wrong')
+      assert(h['X-OpenRouter-Title'] === 'Tau', 'X-OpenRouter-Title header wrong')
+      assert(h['X-OpenRouter-Categories'] === 'cli-agent', 'X-OpenRouter-Categories header wrong')
+      assert(h['X-Title'] === 'Tau', 'legacy X-Title header wrong')
+    } finally {
+      if (oldReferer === undefined) delete process.env.OPENROUTER_REFERER
+      else process.env.OPENROUTER_REFERER = oldReferer
+      if (oldTitle === undefined) delete process.env.OPENROUTER_TITLE
+      else process.env.OPENROUTER_TITLE = oldTitle
+      if (oldCategories === undefined) delete process.env.OPENROUTER_CATEGORIES
+      else process.env.OPENROUTER_CATEGORIES = oldCategories
+    }
   })
   test('openrouter cache-control mode is last-only for Claude models', () => {
     assert(

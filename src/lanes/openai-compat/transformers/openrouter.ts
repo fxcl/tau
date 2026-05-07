@@ -1,8 +1,8 @@
 /**
  * OpenRouter transformer.
  *
- * - Injects `HTTP-Referer` + `X-Title` headers so OpenRouter's
- *   analytics credit Tau.
+ * - Injects OpenRouter app-attribution headers so rankings credit Tau
+ *   under the CLI agent category.
  * - cache_control is PASSED THROUGH for Anthropic/Gemini models (they
  *   natively support it); stripped for everything else so OpenRouter
  *   doesn't surface it as an unknown-field warning.
@@ -33,9 +33,15 @@ export const openrouterTransformer: Transformer = {
   },
 
   buildHeaders(_apiKey: string): Record<string, string> {
+    const referer = process.env.OPENROUTER_REFERER ?? 'https://github.com/AbdoKnbGit/tau'
+    const title = process.env.OPENROUTER_TITLE ?? 'Tau'
+    const categories = process.env.OPENROUTER_CATEGORIES ?? 'cli-agent'
+
     return {
-      'HTTP-Referer': 'https://github.com/AbdoKnbGit/tau',
-      'X-Title': 'Tau',
+      'HTTP-Referer': referer,
+      'X-OpenRouter-Title': title,
+      'X-OpenRouter-Categories': categories,
+      'X-Title': title,
     }
   },
 

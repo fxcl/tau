@@ -6,7 +6,8 @@
  *
  * Base URL: https://openrouter.ai/api/v1
  * Auth: Bearer token (sk-or-...)
- * Extra headers: HTTP-Referer, X-Title (for model rankings)
+ * Extra headers: HTTP-Referer, X-OpenRouter-Title,
+ * X-OpenRouter-Categories (for app rankings)
  */
 
 import { OpenAIProvider } from './openai_provider.js'
@@ -25,9 +26,11 @@ export class OpenRouterProvider extends OpenAIProvider {
       apiKey: config.apiKey,
       baseUrl: 'https://openrouter.ai/api/v1',
       extraHeaders: {
-        // OpenRouter uses these for model rankings and attribution
-        'HTTP-Referer': process.env.OPENROUTER_REFERER ?? 'https://github.com/claude-code-multi-provider',
-        'X-Title': process.env.OPENROUTER_TITLE ?? 'Tau (Multi-Provider)',
+        // OpenRouter uses these for app rankings and attribution.
+        'HTTP-Referer': process.env.OPENROUTER_REFERER ?? 'https://github.com/AbdoKnbGit/tau',
+        'X-OpenRouter-Title': process.env.OPENROUTER_TITLE ?? 'Tau',
+        'X-OpenRouter-Categories': process.env.OPENROUTER_CATEGORIES ?? 'cli-agent',
+        'X-Title': process.env.OPENROUTER_TITLE ?? 'Tau',
         ...(config.extraHeaders ?? {}),
       },
     })
