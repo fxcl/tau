@@ -206,10 +206,8 @@ test('Cursor 464 surfaces the native named-model rejection message', () => {
   )
   assert(
     message === [
-      'Error: Named models unavailable',
-      'Free plans can only use Auto. Switch to Auto or upgrade plans to continue.',
-      'hideIcon: true',
-      'hideKeybindings: true',
+      'Cursor rejected the request: named Claude models are not available on the free plan.',
+      'Pick "Auto" in the model picker, or upgrade your Cursor plan, to keep using Cursor as the provider.',
     ].join('\n'),
     `wrong 464 native message: ${JSON.stringify(message)}`,
   )
@@ -218,7 +216,7 @@ test('Cursor 464 surfaces the native named-model rejection message', () => {
 test('Cursor infers the native named-model rejection block when 464 has no body', () => {
   const message = formatCursorApiError(464, '', 'gpt-5.3-codex')
   assert(
-    message.includes('Free plans can only use Auto. Switch to Auto or upgrade plans to continue.'),
+    message.includes('named Claude models are not available on the free plan'),
     `missing inferred named-model guidance: ${JSON.stringify(message)}`,
   )
 })

@@ -50,7 +50,10 @@ import {
   hasAnthropicApiKeyAuth,
 } from '../../utils/auth.js'
 import { performLogout } from '../logout/logout.js'
-import { Login as AnthropicLogin } from '../login/login.js'
+import {
+  E2BSecurityLogin,
+  Login as AnthropicLogin,
+} from '../login/login.js'
 import {
   GEMINI_VOICE_KEY,
   VOICE_CONVERSATION_LABEL,
@@ -62,6 +65,13 @@ import {
   hasStoredVoiceConversationKey,
   saveVoiceConversationApiKey,
 } from '../../voice/voiceConversation.js'
+import {
+  E2B_SECURITY_DISPLAY_NAME,
+  E2B_SECURITY_PROVIDER,
+  clearE2BSecurityCredentials,
+  formatE2BSecurityBadge,
+  hasE2BSecurityAuth,
+} from '../../utils/safetest/e2bSecurity.js'
 
 // ─── Config ──────────────────────────────────────────────────────
 
@@ -113,6 +123,7 @@ const MANAGEABLE_PROVIDERS = [
 const MANAGEABLE_PROVIDER_ROWS = [
   ...MANAGEABLE_PROVIDERS,
   VOICE_CONVERSATION_PROVIDER,
+  E2B_SECURITY_PROVIDER,
 ] as const
 
 type ManageableProvider = (typeof MANAGEABLE_PROVIDER_ROWS)[number]
@@ -123,11 +134,15 @@ const OLLAMA_DEFAULT_BASE = 'http://localhost:11434'
 
 type KeyedProvider = Exclude<
   ManageableProvider,
-  'ollama' | 'firstParty' | typeof VOICE_CONVERSATION_PROVIDER
+  | 'ollama'
+  | 'firstParty'
+  | typeof VOICE_CONVERSATION_PROVIDER
+  | typeof E2B_SECURITY_PROVIDER
 >
 
 function getManageableProviderName(provider: ManageableProvider): string {
   if (provider === VOICE_CONVERSATION_PROVIDER) return VOICE_CONVERSATION_LABEL
+  if (provider === E2B_SECURITY_PROVIDER) return E2B_SECURITY_DISPLAY_NAME
   return PROVIDER_DISPLAY_NAMES[provider]
 }
 
@@ -256,6 +271,7 @@ type View =
       error?: string
     }
   | { kind: 'anthropic_login' }
+  | { kind: 'e2b_login' }
   | {
       kind: 'result'
       provider: ManageableProvider
@@ -284,6 +300,16 @@ function buildConfigureOptions(
       getVoiceConversationStatus().provider === 'gemini' ||
       hasStoredVoiceConversationKey()
     ) {
+      options.push({ kind: 'deactivate' })
+    }
+    options.push({ kind: 'back' })
+    return options
+  }
+
+  if (provider === E2B_SECURITY_PROVIDER) {
+    const options: ConfigureOption[] = []
+    options.push({ kind: 'login' })
+    if (hasE2BSecurityAuth()) {
       options.push({ kind: 'deactivate' })
     }
     options.push({ kind: 'back' })
@@ -350,10 +376,14 @@ function labelConfigureOption(
     case 'login':
       return provider === 'firstParty'
         ? 'Log in with Anthropic (subscription / Console API / platform)'
+        : provider === E2B_SECURITY_PROVIDER
+        ? 'Log in with E2B API key or auth token'
         : 'Log in'
     case 'deactivate':
       return provider === VOICE_CONVERSATION_PROVIDER
         ? 'Deactivate voice conversation'
+        : provider === E2B_SECURITY_PROVIDER
+        ? 'Clear E2B credentials'
         : 'Deactivate (clear all credentials)'
     case 'set_voice_key':
       return 'Set Gemini voice API key'
@@ -545,6 +575,35 @@ function ProviderManager({
     })
   }
 
+  function handleE2BLoginDone(success: boolean) {
+    if (success) {
+      refresh()
+      setView({
+        kind: 'result',
+        provider: E2B_SECURITY_PROVIDER,
+        tone: 'success',
+        message: `${E2B_SECURITY_DISPLAY_NAME} connected.`,
+      })
+      return
+    }
+    setView({
+      kind: 'configure',
+      provider: E2B_SECURITY_PROVIDER,
+      selectedIndex: 0,
+    })
+  }
+
+  function handleE2BDeactivate() {
+    clearE2BSecurityCredentials()
+    refresh()
+    setView({
+      kind: 'result',
+      provider: E2B_SECURITY_PROVIDER,
+      tone: 'success',
+      message: `${E2B_SECURITY_DISPLAY_NAME} credentials cleared.`,
+    })
+  }
+
   // ─── Ollama handlers ──────────────────────────────────────────
 
   function handleTestOllama() {
@@ -709,9 +768,11 @@ function ProviderManager({
             }
             return
           case 'login':
-            // Only firstParty uses this option today.
             if (view.provider === 'firstParty') {
               setView({ kind: 'anthropic_login' })
+            }
+            if (view.provider === E2B_SECURITY_PROVIDER) {
+              setView({ kind: 'e2b_login' })
             }
             return
           case 'deactivate':
@@ -721,6 +782,10 @@ function ProviderManager({
             }
             if (view.provider === VOICE_CONVERSATION_PROVIDER) {
               handleVoiceDeactivate()
+              return
+            }
+            if (view.provider === E2B_SECURITY_PROVIDER) {
+              handleE2BDeactivate()
               return
             }
             if (view.provider !== 'ollama') handleDeactivate(view.provider)
@@ -782,6 +847,8 @@ function ProviderManager({
             const badge =
               provider === VOICE_CONVERSATION_PROVIDER
                 ? formatVoiceConversationBadge()
+                : provider === E2B_SECURITY_PROVIDER
+                ? chalk.green(formatE2BSecurityBadge())
                 : provider === 'ollama'
                 ? formatOllamaBadge(ollamaStatus)
                 : provider === 'gemini'
@@ -819,6 +886,8 @@ function ProviderManager({
     const badge =
       provider === VOICE_CONVERSATION_PROVIDER
         ? formatVoiceConversationBadge()
+        : provider === E2B_SECURITY_PROVIDER
+        ? chalk.green(formatE2BSecurityBadge())
         : provider === 'ollama'
         ? formatOllamaBadge(ollamaStatus)
         : provider === 'gemini'
@@ -954,6 +1023,10 @@ function ProviderManager({
 
   if (view.kind === 'anthropic_login') {
     return <AnthropicLogin onDone={handleAnthropicLoginDone} />
+  }
+
+  if (view.kind === 'e2b_login') {
+    return <E2BSecurityLogin onDone={handleE2BLoginDone} />
   }
 
   if (view.kind === 'result') {

@@ -1317,10 +1317,8 @@ function _extractCursorJsonErrorDetail(parsed: unknown): string | null {
 
 function _namedModelUnavailableMessage(): string {
   return [
-    'Error: Named models unavailable',
-    'Free plans can only use Auto. Switch to Auto or upgrade plans to continue.',
-    'hideIcon: true',
-    'hideKeybindings: true',
+    'Cursor rejected the request: named Claude models are not available on the free plan.',
+    'Pick "Auto" in the model picker, or upgrade your Cursor plan, to keep using Cursor as the provider.',
   ].join('\n')
 }
 

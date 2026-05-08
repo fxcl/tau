@@ -134,7 +134,7 @@ function hasKnownLaneAccountLimitText(text: string): boolean {
     /^GitHub Copilot rejected this request because the current account has no quota left\b/i.test(
       normalized,
     ) ||
-    /^Error:\s*Named models unavailable\s+Free plans can only use Auto\./i.test(
+    /^Cursor rejected the request:\s*named Claude models are not available on the free plan\b/i.test(
       compact,
     ) ||
     /^You've hit your usage limit\b.*\bGet Cursor Pro\b.*\bAgent usage\b/i.test(
