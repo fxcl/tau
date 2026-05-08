@@ -53,7 +53,7 @@ const SuggestionItemRow = memo(function SuggestionItemRow(t0) {
       t1 = $[1];
     }
     const icon = t1;
-    const textColor = isSelected ? "suggestion" : undefined;
+    const textColor = isSelected ? "primary" : undefined;
     const dimColor = !isSelected;
     const isFile = item.id.startsWith("file-");
     const isMcpResource = item.id.startsWith("mcp-resource-");
@@ -127,7 +127,7 @@ const SuggestionItemRow = memo(function SuggestionItemRow(t0) {
   }
   const maxNameWidth = Math.floor(columns * 0.4);
   const displayTextWidth = Math.min(maxColumnWidth ?? stringWidth(item.displayText) + 5, maxNameWidth);
-  const textColor_0 = item.color || (isSelected ? "suggestion" : undefined);
+  const textColor_0 = item.color || (isSelected ? "primary" : undefined);
   const shouldDim = !isSelected;
   let displayText_0 = item.displayText;
   if (stringWidth(displayText_0) > displayTextWidth - 2) {
@@ -175,7 +175,7 @@ const SuggestionItemRow = memo(function SuggestionItemRow(t0) {
   } else {
     t3 = $[27];
   }
-  const t4 = isSelected ? "suggestion" : undefined;
+  const t4 = isSelected ? "primary" : undefined;
   const t5 = !isSelected;
   let t6;
   if ($[28] !== t4 || $[29] !== t5 || $[30] !== truncatedDescription) {
