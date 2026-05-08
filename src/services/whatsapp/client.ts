@@ -432,9 +432,7 @@ class WhatsAppClient {
         this.ownBareIds = new Set(
           candidates.map(id => id.replace(/[@:].*$/, '')).filter(Boolean),
         )
-        log(
-          `connected · sock.user=${JSON.stringify(sock.user)} creds.me=${JSON.stringify(authState.state.creds.me)} ownBareIds=${[...this.ownBareIds].join(',')}`,
-        )
+        log(`connected · self identifiers loaded (${this.ownBareIds.size})`)
         this.setStatus('connected')
 
         if (this.watchdogTimer) clearInterval(this.watchdogTimer)
@@ -469,9 +467,7 @@ class WhatsAppClient {
           const msgId = msg.key.id
           const fromMe = !!msg.key.fromMe
 
-          log(
-            `upsert: jid=${jid} fromMe=${fromMe} id=${msgId} hasText=${!!extractText(msg.message)}`,
-          )
+          log(`upsert: fromMe=${fromMe} hasText=${!!extractText(msg.message)}`)
 
           if (!jid) continue
           if (jid.endsWith('@broadcast') || jid.endsWith('@status')) continue
@@ -483,9 +479,7 @@ class WhatsAppClient {
           // never match and are dropped.
           const fromBareId = jid.replace(/[@:].*$/, '')
           if (this.ownBareIds.size === 0 || !this.ownBareIds.has(fromBareId)) {
-            log(
-              `upsert dropped: not self chat (own=${[...this.ownBareIds].join('|')} from=${fromBareId})`,
-            )
+            log('upsert dropped: not self chat')
             continue
           }
 
