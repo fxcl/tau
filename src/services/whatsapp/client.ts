@@ -45,6 +45,8 @@ const HEALTHY_THRESHOLD = 60 * 1000
 const SEEN_TTL = 20 * 60 * 1000
 const SEEN_MAX = 5000
 const RAW_MSG_CAP = 500
+const SENT_ECHO_TTL = 5 * 60 * 1000
+const SENT_ECHO_MAX = 500
 
 // Logs go to ~/.claude/whatsapp/whatsapp.log — never stderr, since stderr in
 // the interactive TUI overlaps ink's render frames and corrupts the screen.
@@ -75,6 +77,10 @@ class WhatsAppClient {
   // `messages.upsert` when fromMe=true so that user-authored fromMe
   // messages (the "Message yourself" chat) still drive the agent loop.
   private ourSentIds = new Set<string>()
+  // WhatsApp can echo an outbound message back with a different ID. Track a
+  // short-lived signature of sent text so Tau never treats its own reply as the
+  // next prompt in the self-chat.
+  private recentSentTextSignatures = new Map<string, number>()
   // The connected account's own identifiers, derived from sock.user at
   // socket open. WhatsApp Multi-Device exposes both a phone-number JID
   // (id, "1234:N@s.whatsapp.net") and a privacy LID (lid,
@@ -467,7 +473,8 @@ class WhatsAppClient {
           const msgId = msg.key.id
           const fromMe = !!msg.key.fromMe
 
-          log(`upsert: fromMe=${fromMe} hasText=${!!extractText(msg.message)}`)
+          const text = extractText(msg.message)
+          log(`upsert: fromMe=${fromMe} hasText=${!!text}`)
 
           if (!jid) continue
           if (jid.endsWith('@broadcast') || jid.endsWith('@status')) continue
@@ -484,9 +491,10 @@ class WhatsAppClient {
           }
 
           // fromMe messages in the self-chat come from two sources:
-          // (1) Tau's own replies echoed back — skip by tracked id.
+          // (1) Tau's own replies echoed back — skip by tracked id or text.
           // (2) you typing in "Message yourself" — process as a prompt.
           if (fromMe && msgId && this.ourSentIds.has(msgId)) continue
+          if (fromMe && text && this.consumeRecentSentText(text)) continue
 
           const participant = msg.key.participant
 
@@ -540,8 +548,14 @@ class WhatsAppClient {
     if (!this.sock || !this.connectionReady) {
       throw new Error('WhatsApp not connected')
     }
-    const sent = await this.sock.sendMessage(jid, { text })
-    if (sent?.key?.id) this.trackSent(sent.key.id)
+    const signature = this.trackSentText(text)
+    try {
+      const sent = await this.sock.sendMessage(jid, { text })
+      if (sent?.key?.id) this.trackSent(sent.key.id)
+    } catch (err) {
+      if (signature) this.recentSentTextSignatures.delete(signature)
+      throw err
+    }
   }
 
   async react(jid: string, msgId: string, emoji: string): Promise<void> {
@@ -564,6 +578,41 @@ class WhatsAppClient {
 
   isOurSentId(id: string): boolean {
     return this.ourSentIds.has(id)
+  }
+
+  private trackSentText(text: string): string | null {
+    const signature = textSignature(text)
+    if (!signature) return null
+    const now = Date.now()
+    this.recentSentTextSignatures.set(signature, now)
+    this.evictSentTextSignatures(now)
+    return signature
+  }
+
+  private consumeRecentSentText(text: string): boolean {
+    const signature = textSignature(text)
+    if (!signature) return false
+    const sentAt = this.recentSentTextSignatures.get(signature)
+    if (!sentAt) return false
+    const now = Date.now()
+    if (now - sentAt > SENT_ECHO_TTL) {
+      this.recentSentTextSignatures.delete(signature)
+      return false
+    }
+    this.recentSentTextSignatures.delete(signature)
+    return true
+  }
+
+  private evictSentTextSignatures(now: number): void {
+    for (const [signature, sentAt] of this.recentSentTextSignatures) {
+      if (
+        now - sentAt <= SENT_ECHO_TTL &&
+        this.recentSentTextSignatures.size <= SENT_ECHO_MAX
+      ) {
+        break
+      }
+      this.recentSentTextSignatures.delete(signature)
+    }
   }
 }
 
@@ -600,6 +649,17 @@ function formatJid(jid: string): string {
     .replace(/@g\.us$/, '')
     .replace(/@lid$/, '')
     .replace(/:\d+$/, '')
+}
+
+function textSignature(text: string): string | null {
+  const normalized = text.replace(/\r\n/g, '\n').trim()
+  if (!normalized) return null
+  let hash = 2166136261
+  for (let i = 0; i < normalized.length; i++) {
+    hash ^= normalized.charCodeAt(i)
+    hash = Math.imul(hash, 16777619)
+  }
+  return `${normalized.length}:${(hash >>> 0).toString(36)}`
 }
 
 // Baileys crypto errors should reconnect, not crash. Keep handler scoped.
