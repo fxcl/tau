@@ -34,8 +34,8 @@ export function PromptInputStatusBar({ mcpClients }: Props): React.ReactNode {
         {cwd}
       </Text>
       <Box flexDirection="row" gap={2} flexShrink={0}>
-        {failed > 0 && <Text color="error">⊙ {failed} MCP issue{failed === 1 ? '' : 's'}</Text>}
-        {connected > 0 && <Text color="textMuted">⊙ {connected} MCP</Text>}
+        {failed > 0 && <Text color="error">● {failed} MCP issue{failed === 1 ? '' : 's'}</Text>}
+        {connected > 0 && <Text color="textMuted">● {connected} MCP</Text>}
         <Text color="textMuted">/status</Text>
       </Box>
     </Box>

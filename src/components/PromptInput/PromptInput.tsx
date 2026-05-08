@@ -2248,7 +2248,7 @@ function PromptInput({
     return 'promptBorder';
   };
   if (isExternalEditorActive) {
-    // Studio prompt frame: top + left border in mode color, ╹ foot below.
+    // Studio prompt frame: top + left border in mode color, ╵ foot below.
     return <>
         <Box flexDirection="row" alignItems="center" justifyContent="center" borderColor={getBorderColor()} borderStyle="round" borderRight={false} borderBottom={false} width="100%">
           <Text dimColor italic>
@@ -2256,7 +2256,7 @@ function PromptInput({
           </Text>
         </Box>
         <Box height={1} flexShrink={0}>
-          <Text color={getBorderColor()}>╹</Text>
+          <Text color={getBorderColor()}>╵</Text>
         </Box>
       </>;
   }
@@ -2286,7 +2286,7 @@ function PromptInput({
           </Box>
           <Text color={swarmBanner.bgColor}>{'─'.repeat(columns)}</Text>
         </> : <>
-          {/* Studio prompt frame: top + left border in mode color, ╹ foot below. */}
+          {/* Studio prompt frame: top + left border in mode color, ╵ foot below. */}
           <Box flexDirection="row" alignItems="flex-start" justifyContent="flex-start" borderColor={getBorderColor()} borderStyle="round" borderRight={false} borderBottom={false} width="100%" borderText={buildBorderText(showFastIcon ?? false, showFastIconHint, fastModeCooldown)}>
             <PromptInputModeIndicator mode={mode} isLoading={isLoading} viewingAgentName={viewingAgentName} viewingAgentColor={viewingAgentColor} />
             <Box flexGrow={1} flexShrink={1} onClick={handleInputClick}>
@@ -2294,7 +2294,7 @@ function PromptInput({
             </Box>
           </Box>
           <Box height={1} flexShrink={0}>
-            <Text color={getBorderColor()}>╹</Text>
+            <Text color={getBorderColor()}>╵</Text>
           </Box>
         </>}
       <PromptInputFooter apiKeyStatus={apiKeyStatus} debug={debug} exitMessage={exitMessage} vimMode={isVimModeEnabled() ? vimMode : undefined} mode={mode} autoUpdaterResult={autoUpdaterResult} isAutoUpdating={isAutoUpdating} verbose={verbose} onAutoUpdaterResult={onAutoUpdaterResult} onChangeIsUpdating={setIsAutoUpdating} suggestions={suggestions} selectedSuggestion={selectedSuggestion} maxColumnWidth={maxColumnWidth} toolPermissionContext={effectiveToolPermissionContext} helpOpen={helpOpen} suppressHint={input.length > 0} isLoading={isLoading} tasksSelected={tasksSelected} teamsSelected={teamsSelected} bridgeSelected={bridgeSelected} tmuxSelected={tmuxSelected} teammateFooterIndex={teammateFooterIndex} ideSelection={ideSelection} mcpClients={mcpClients} isPasting={isPasting} isInputWrapped={isInputWrapped} messages={messages} isSearching={isSearchingHistory} historyQuery={historyQuery} setHistoryQuery={setHistoryQuery} historyFailedMatch={historyFailedMatch} onOpenTasksDialog={isFullscreenEnvEnabled() ? handleOpenTasksDialog : undefined} />
