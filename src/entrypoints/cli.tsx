@@ -217,11 +217,8 @@ async function main(): Promise<void> {
     return;
   }
 
-  // Pre-Ink Tau ember logo. Prints directly to stdout so the user gets
-  // immediate feedback before the heavier imports load. Internally gated for
-  // non-TTY / NO_COLOR / -p so scripted and CI runs stay silent.
-  const { printStartupScreen } = await import('../components/StartupScreen.js');
-  printStartupScreen();
+  // Pre-Ink ASCII banner removed — clean centered welcome handled by the
+  // Ink-rendered MinimalWelcome inside the session view.
 
   // For all other paths, load the startup profiler
   const {
