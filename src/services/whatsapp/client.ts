@@ -45,8 +45,8 @@ const HEALTHY_THRESHOLD = 60 * 1000
 const SEEN_TTL = 20 * 60 * 1000
 const SEEN_MAX = 5000
 const RAW_MSG_CAP = 500
-const SENT_ECHO_TTL = 5 * 60 * 1000
-const SENT_ECHO_MAX = 500
+const SENT_TEXT_TTL = 60 * 1000
+const SENT_TEXT_MAX = 200
 
 // Logs go to ~/.claude/whatsapp/whatsapp.log — never stderr, since stderr in
 // the interactive TUI overlaps ink's render frames and corrupts the screen.
@@ -77,13 +77,14 @@ class WhatsAppClient {
   // `messages.upsert` when fromMe=true so that user-authored fromMe
   // messages (the "Message yourself" chat) still drive the agent loop.
   private ourSentIds = new Set<string>()
-  // WhatsApp can echo an outbound message back with a different ID. Track a
-  // short-lived signature of sent text so Tau never treats its own reply as the
-  // next prompt in the self-chat.
-  private recentSentTextSignatures = new Map<string, number>()
-  // Some linked-device echoes change the message id but keep the generated id
-  // family/prefix. Track that too so formatted echoes are still suppressed.
-  private recentSentIdFamilies = new Map<string, number>()
+  // Content-based echo guard. The ID guard above can miss in two cases:
+  // (1) race — `messages.upsert` for our own send arrives before
+  //     `sock.sendMessage` resolves the key we'd track; (2) Baileys
+  // versions occasionally return a `sent.key.id` that doesn't byte-match
+  // what comes back on the wire. Either failure feeds the agent its own
+  // reply as a new prompt and loops. Recording outbound text before send
+  // (with TTL) lets us drop the echo even when the ID guard fails.
+  private recentSentTexts = new Map<string, number>()
   // The connected account's own identifiers, derived from sock.user at
   // socket open. WhatsApp Multi-Device exposes both a phone-number JID
   // (id, "1234:N@s.whatsapp.net") and a privacy LID (lid,
@@ -441,7 +442,9 @@ class WhatsAppClient {
         this.ownBareIds = new Set(
           candidates.map(id => id.replace(/[@:].*$/, '')).filter(Boolean),
         )
-        log(`connected · self identifiers loaded (${this.ownBareIds.size})`)
+        log(
+          `connected · sock.user=${JSON.stringify(sock.user)} creds.me=${JSON.stringify(authState.state.creds.me)} ownBareIds=${[...this.ownBareIds].join(',')}`,
+        )
         this.setStatus('connected')
 
         if (this.watchdogTimer) clearInterval(this.watchdogTimer)
@@ -476,8 +479,9 @@ class WhatsAppClient {
           const msgId = msg.key.id
           const fromMe = !!msg.key.fromMe
 
-          const text = extractText(msg.message)
-          log(`upsert: fromMe=${fromMe} hasText=${!!text}`)
+          log(
+            `upsert: jid=${jid} fromMe=${fromMe} id=${msgId} hasText=${!!extractText(msg.message)}`,
+          )
 
           if (!jid) continue
           if (jid.endsWith('@broadcast') || jid.endsWith('@status')) continue
@@ -489,24 +493,23 @@ class WhatsAppClient {
           // never match and are dropped.
           const fromBareId = jid.replace(/[@:].*$/, '')
           if (this.ownBareIds.size === 0 || !this.ownBareIds.has(fromBareId)) {
-            log('upsert dropped: not self chat')
+            log(
+              `upsert dropped: not self chat (own=${[...this.ownBareIds].join('|')} from=${fromBareId})`,
+            )
             continue
           }
 
-          // Self-chat echoes are not stable across linked-device paths: the
-          // same Tau reply can come back with a different message id and may
-          // not always be flagged fromMe. Suppress by sent text before routing.
-          if (fromMe && msgId && this.ourSentIds.has(msgId)) {
-            log('upsert dropped: sent id echo')
-            continue
-          }
-          if (fromMe && msgId && this.isRecentSentIdFamily(msgId)) {
-            log('upsert dropped: sent id-family echo')
-            continue
-          }
-          if (text && this.consumeRecentSentText(text)) {
-            log('upsert dropped: sent text echo')
-            continue
+          // fromMe messages in the self-chat come from two sources:
+          // (1) Tau's own replies echoed back — skip by tracked id, or
+          //     by content match if the id guard didn't catch it.
+          // (2) you typing in "Message yourself" — process as a prompt.
+          if (fromMe) {
+            if (msgId && this.ourSentIds.has(msgId)) continue
+            const echoText = extractText(msg.message ?? {})
+            if (echoText && this.isOurSentText(echoText)) {
+              log(`upsert dropped: echo by content match (id=${msgId})`)
+              continue
+            }
           }
 
           const participant = msg.key.participant
@@ -561,14 +564,11 @@ class WhatsAppClient {
     if (!this.sock || !this.connectionReady) {
       throw new Error('WhatsApp not connected')
     }
-    const signature = this.trackSentText(text)
-    try {
-      const sent = await this.sock.sendMessage(jid, { text })
-      if (sent?.key?.id) this.trackSent(sent.key.id)
-    } catch (err) {
-      if (signature) this.recentSentTextSignatures.delete(signature)
-      throw err
-    }
+    // Track the text before the await so a fast-path `messages.upsert`
+    // echo can be matched even if it arrives before sendMessage resolves.
+    this.trackSentText(text)
+    const sent = await this.sock.sendMessage(jid, { text })
+    if (sent?.key?.id) this.trackSent(sent.key.id)
   }
 
   async react(jid: string, msgId: string, emoji: string): Promise<void> {
@@ -581,7 +581,6 @@ class WhatsAppClient {
 
   private trackSent(id: string): void {
     this.ourSentIds.add(id)
-    this.trackSentIdFamily(id)
     // FIFO eviction — Set preserves insertion order. Cap at 500 so a
     // long-running session doesn't grow unbounded.
     if (this.ourSentIds.size > 500) {
@@ -590,75 +589,28 @@ class WhatsAppClient {
     }
   }
 
+  private trackSentText(text: string): void {
+    if (!text) return
+    this.recentSentTexts.set(text, Date.now())
+    if (this.recentSentTexts.size > SENT_TEXT_MAX) {
+      const first = this.recentSentTexts.keys().next().value
+      if (first) this.recentSentTexts.delete(first)
+    }
+  }
+
+  private isOurSentText(text: string): boolean {
+    if (!text) return false
+    const ts = this.recentSentTexts.get(text)
+    if (!ts) return false
+    if (Date.now() - ts > SENT_TEXT_TTL) {
+      this.recentSentTexts.delete(text)
+      return false
+    }
+    return true
+  }
+
   isOurSentId(id: string): boolean {
     return this.ourSentIds.has(id)
-  }
-
-  private trackSentText(text: string): string | null {
-    const signature = textSignature(text)
-    if (!signature) return null
-    const now = Date.now()
-    this.recentSentTextSignatures.set(signature, now)
-    this.evictSentTextSignatures(now)
-    return signature
-  }
-
-  private consumeRecentSentText(text: string): boolean {
-    const signature = textSignature(text)
-    if (!signature) return false
-    const sentAt = this.recentSentTextSignatures.get(signature)
-    if (!sentAt) return false
-    const now = Date.now()
-    if (now - sentAt > SENT_ECHO_TTL) {
-      this.recentSentTextSignatures.delete(signature)
-      return false
-    }
-    return true
-  }
-
-  private evictSentTextSignatures(now: number): void {
-    for (const [signature, sentAt] of this.recentSentTextSignatures) {
-      if (
-        now - sentAt <= SENT_ECHO_TTL &&
-        this.recentSentTextSignatures.size <= SENT_ECHO_MAX
-      ) {
-        break
-      }
-      this.recentSentTextSignatures.delete(signature)
-    }
-  }
-
-  private trackSentIdFamily(id: string): void {
-    const family = messageIdFamily(id)
-    if (!family) return
-    const now = Date.now()
-    this.recentSentIdFamilies.set(family, now)
-    this.evictSentIdFamilies(now)
-  }
-
-  private isRecentSentIdFamily(id: string): boolean {
-    const family = messageIdFamily(id)
-    if (!family) return false
-    const sentAt = this.recentSentIdFamilies.get(family)
-    if (!sentAt) return false
-    const now = Date.now()
-    if (now - sentAt > SENT_ECHO_TTL) {
-      this.recentSentIdFamilies.delete(family)
-      return false
-    }
-    return true
-  }
-
-  private evictSentIdFamilies(now: number): void {
-    for (const [family, sentAt] of this.recentSentIdFamilies) {
-      if (
-        now - sentAt <= SENT_ECHO_TTL &&
-        this.recentSentIdFamilies.size <= SENT_ECHO_MAX
-      ) {
-        break
-      }
-      this.recentSentIdFamilies.delete(family)
-    }
   }
 }
 
@@ -695,21 +647,6 @@ function formatJid(jid: string): string {
     .replace(/@g\.us$/, '')
     .replace(/@lid$/, '')
     .replace(/:\d+$/, '')
-}
-
-function textSignature(text: string): string | null {
-  const normalized = text.replace(/\r\n/g, '\n').trim()
-  if (!normalized) return null
-  let hash = 2166136261
-  for (let i = 0; i < normalized.length; i++) {
-    hash ^= normalized.charCodeAt(i)
-    hash = Math.imul(hash, 16777619)
-  }
-  return `${normalized.length}:${(hash >>> 0).toString(36)}`
-}
-
-function messageIdFamily(id: string): string | null {
-  return id.length >= 4 ? id.slice(0, 4) : null
 }
 
 // Baileys crypto errors should reconnect, not crash. Keep handler scoped.
