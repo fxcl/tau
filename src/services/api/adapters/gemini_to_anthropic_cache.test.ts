@@ -92,13 +92,51 @@ async function main(): Promise<void> {
     })())
 
     const finalDelta = events.find(event => event.type === 'message_delta') as
-      | Extract<AnthropicStreamEvent, { type: 'message_delta' }>
+      | (AnthropicStreamEvent & { type: 'message_delta' })
       | undefined
 
-    assert(finalDelta !== undefined, 'missing final message_delta')
+    if (finalDelta === undefined) throw new Error('missing final message_delta')
     assert(finalDelta.usage?.input_tokens === 20757, `input_tokens=${finalDelta.usage?.input_tokens}`)
     assert(finalDelta.usage?.cache_read_input_tokens === 15105, `cache_read_input_tokens=${finalDelta.usage?.cache_read_input_tokens}`)
     assert(finalDelta.usage?.output_tokens === 90, `output_tokens=${finalDelta.usage?.output_tokens}`)
+  })
+
+  await test('tool-call placeholder text is filtered', async () => {
+    const nonStreaming = geminiMessageToAnthropic({
+      candidates: [{
+        content: {
+          parts: [
+            { text: '00' },
+            { functionCall: { name: 'Computer', args: { action: 'screenshot' } } },
+          ],
+        },
+        finishReason: 'STOP',
+      }],
+    }, 'gemini-2.5-flash')
+
+    assert(!nonStreaming.content.some(block => block.type === 'text'),
+      'non-streaming placeholder text was emitted')
+    assert(nonStreaming.content.some(block => block.type === 'tool_use'),
+      'non-streaming tool_use was not emitted')
+
+    const streaming = await collect((async function* () {
+      yield {
+        candidates: [{
+          content: {
+            parts: [
+              { text: '_' },
+              { functionCall: { name: 'Computer', args: { action: 'screenshot' } } },
+            ],
+          },
+          finishReason: 'STOP',
+        }],
+      }
+    })())
+
+    assert(!streaming.some(event => event.delta?.type === 'text_delta'),
+      'streaming placeholder text was emitted')
+    assert(streaming.some(event => event.content_block?.type === 'tool_use'),
+      'streaming tool_use was not emitted')
   })
 
   await test('legacy API parser handles multi-line cache usage events', async () => {

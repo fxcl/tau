@@ -729,6 +729,18 @@ function convertMessages(
               response: { content },
             },
           } as GeminiPart)
+          if (Array.isArray(block.content)) {
+            for (const item of block.content) {
+              if (item.type === 'image' && item.source) {
+                parts.push({
+                  inlineData: {
+                    mimeType: item.source.media_type,
+                    data: item.source.data,
+                  },
+                })
+              }
+            }
+          }
           break
         }
 

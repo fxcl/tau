@@ -61,6 +61,28 @@ function stripAnthropicFields(block: ProviderContentBlock): ProviderContentBlock
   return clean
 }
 
+function textFromContent(content: ProviderContentBlock['content']): string {
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+  return content.map(c => c.text ?? '').join('')
+}
+
+function imagePartsFromContent(
+  content: ProviderContentBlock['content'],
+): OpenAIContentPart[] {
+  if (!Array.isArray(content)) return []
+  return content.flatMap(c =>
+    c.type === 'image' && c.source
+      ? [{
+          type: 'image_url' as const,
+          image_url: {
+            url: `data:${c.source.media_type};base64,${c.source.data}`,
+          },
+        }]
+      : [],
+  )
+}
+
 // ─── Message Conversion ────────────────────────────────────────────
 
 export interface AdapterOptions {
@@ -155,16 +177,27 @@ export function anthropicMessagesToOpenAI(
       const otherBlocks = blocks.filter(b => b.type !== 'tool_result')
 
       // Emit tool results as separate 'tool' role messages
+      const toolResultImageParts: OpenAIContentPart[] = []
       for (const tr of toolResults) {
-        const content = typeof tr.content === 'string'
-          ? tr.content
-          : Array.isArray(tr.content)
-            ? tr.content.map(c => c.text ?? '').join('')
-            : ''
+        const content = textFromContent(tr.content)
+        toolResultImageParts.push(...imagePartsFromContent(tr.content))
         result.push({
           role: 'tool',
           tool_call_id: tr.tool_use_id ?? '',
           content,
+        })
+      }
+
+      if (toolResultImageParts.length > 0) {
+        result.push({
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: 'Visual observation from the previous tool result:',
+            },
+            ...toolResultImageParts,
+          ],
         })
       }
 

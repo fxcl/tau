@@ -67,6 +67,26 @@ export interface ResponsesApiTool {
   strict: boolean
 }
 
+function textFromContent(content: ProviderContentBlock['content']): string {
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+  return (content as ProviderContentBlock[]).map(c => c.text ?? '').join('')
+}
+
+function imageItemsFromContent(
+  content: ProviderContentBlock['content'],
+): Array<Record<string, unknown>> {
+  if (!Array.isArray(content)) return []
+  return (content as ProviderContentBlock[]).flatMap(c =>
+    c.type === 'image' && c.source
+      ? [{
+          type: 'input_image',
+          image_url: `data:${c.source.media_type};base64,${c.source.data}`,
+        }]
+      : [],
+  )
+}
+
 // ─── Input conversion (Anthropic → Responses API) ──────────────────
 
 /**
@@ -146,16 +166,28 @@ export function anthropicToResponsesInput(
       const toolResults = blocks.filter(b => b.type === 'tool_result')
       const otherBlocks = blocks.filter(b => b.type !== 'tool_result')
 
+      const toolResultImageItems: Array<Record<string, unknown>> = []
       for (const tr of toolResults) {
-        const output = typeof tr.content === 'string'
-          ? tr.content
-          : Array.isArray(tr.content)
-            ? (tr.content as ProviderContentBlock[]).map(c => c.text ?? '').join('')
-            : ''
+        const output = textFromContent(tr.content)
+        toolResultImageItems.push(...imageItemsFromContent(tr.content))
         items.push({
           type: 'function_call_output',
           call_id: tr.tool_use_id ?? '',
           output,
+        })
+      }
+
+      if (toolResultImageItems.length > 0) {
+        items.push({
+          type: 'message',
+          role: 'user',
+          content: [
+            {
+              type: 'input_text',
+              text: 'Visual observation from the previous tool result:',
+            },
+            ...toolResultImageItems,
+          ],
         })
       }
 

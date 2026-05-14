@@ -21,6 +21,12 @@ function uncachedInputTokens(promptTokens: number, cacheReadTokens: number): num
   return Math.max(0, promptTokens - cacheReadTokens)
 }
 
+function isLikelyToolCallNoiseText(text: string): boolean {
+  const trimmed = text.trim()
+  if (trimmed.length === 0 || trimmed.length > 16) return false
+  return /^[-_{}\[\](),.:;"'`0-9\s]+$/.test(trimmed)
+}
+
 // ─── Gemini response types ─────────────────────────────────────────
 
 export interface GeminiStreamChunk {
@@ -83,11 +89,12 @@ export function geminiMessageToAnthropic(
   const candidate = response.candidates?.[0]
 
   if (candidate?.content?.parts) {
+    const hasFunctionCall = candidate.content.parts.some(part => part.functionCall)
     for (const part of candidate.content.parts) {
       if (part.text) {
         if (part.thought) {
           content.push({ type: 'thinking', thinking: part.text })
-        } else {
+        } else if (!(hasFunctionCall && isLikelyToolCallNoiseText(part.text))) {
           content.push({ type: 'text', text: part.text })
         }
       }
@@ -210,6 +217,7 @@ export async function* geminiStreamToAnthropicEvents(
 
     // Process parts
     if (candidate?.content?.parts) {
+      const chunkHasFunctionCall = candidate.content.parts.some(part => part.functionCall)
       for (const part of candidate.content.parts) {
         if (part.text !== undefined) {
           if (part.thought) {
@@ -232,7 +240,9 @@ export async function* geminiStreamToAnthropicEvents(
               index: blockIndex,
               delta: { type: 'thinking_delta', thinking: part.text },
             }
-          } else {
+          } else if (
+            !(chunkHasFunctionCall && isLikelyToolCallNoiseText(part.text))
+          ) {
             // Regular text — close thinking block if open
             if (thinkingBlockOpen) {
               yield { type: 'content_block_stop', index: blockIndex }
