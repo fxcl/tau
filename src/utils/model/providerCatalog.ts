@@ -82,6 +82,8 @@ function normalizeProviderQueryToken(
     minimaxai: 'minimax',
     'minimax-ai': 'minimax',
     'mini-max': 'minimax',
+    mistralai: 'mistral',
+    'mistral-ai': 'mistral',
   }
   if (alias[normalized]) {
     return alias[normalized]

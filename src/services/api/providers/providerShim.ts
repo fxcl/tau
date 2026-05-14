@@ -114,7 +114,8 @@ function _ensureLanesInitialized(): void {
       minimaxApiKey: getProviderApiKey('minimax') ?? undefined,
       minimaxBaseUrl: getProviderBaseUrl('minimax'),
       groqApiKey: getProviderApiKey('groq') ?? undefined,
-      mistralApiKey: process.env.MISTRAL_API_KEY,
+      mistralApiKey: getProviderApiKey('mistral') ?? undefined,
+      mistralBaseUrl: getProviderBaseUrl('mistral'),
       nimApiKey: getProviderApiKey('nim') ?? undefined,
       ollamaApiKey: ollamaApiKey ?? undefined,
       ollamaBaseUrl: process.env.OLLAMA_BASE_URL ?? getProviderBaseUrl('ollama'),
@@ -156,6 +157,7 @@ function _laneNameForProvider(provider: APIProvider): string {
     case 'moonshot':
     case 'minimax':
     case 'groq':
+    case 'mistral':
     case 'nim':
     case 'ollama':
     case 'openrouter':
@@ -288,6 +290,11 @@ function createProvider(provider: APIProvider): BaseProvider {
       )
     case 'groq':
       return new GroqProvider({ apiKey })
+    case 'mistral':
+      throw new Error(
+        'Mistral chat requires the openai-compat lane to be healthy. '
+        + 'Run `/login` to authenticate, or check that MISTRAL_API_KEY is set.',
+      )
     case 'nim':
       return new NimProvider({ apiKey, baseUrl })
     case 'deepseek':
@@ -693,6 +700,7 @@ export async function reloadOpenAICompatProviderAuth(provider: APIProvider): Pro
     case 'glm':
     case 'moonshot':
     case 'minimax':
+    case 'mistral':
     case 'nim':
     case 'openrouter':
     case 'agentrouter':

@@ -380,9 +380,110 @@ function main(): void {
     TRANSFORMERS.mistral.transformRequest(body, mkCtx('mistral-large'))
     assert(!('name' in body.messages[0]!), `name field not stripped: ${JSON.stringify(body.messages[0])}`)
   })
+  test('mistral repairs tool-call adjacency and names tool results', () => {
+    const body = mkBody('devstral-latest', {
+      messages: [
+        { role: 'user', content: 'start' },
+        {
+          role: 'assistant',
+          content: null,
+          tool_calls: [
+            mkToolCall('toolu_compat_call_answered', 'Skill'),
+            mkToolCall('toolu_compat_call_missing', 'Grep'),
+          ],
+        },
+        { role: 'tool', tool_call_id: 'toolu_compat_call_answered', content: 'loaded' },
+        { role: 'user', content: 'next' },
+        { role: 'tool', tool_call_id: 'toolu_compat_call_missing', content: 'late orphan' },
+      ],
+    })
+
+    TRANSFORMERS.mistral.transformRequest(body, mkCtx('devstral-latest'))
+
+    const assistant = body.messages[1]
+    assert(body.messages.length === 4, `messages=${JSON.stringify(body.messages)}`)
+    assert(assistant?.role === 'assistant', `assistant role=${assistant?.role}`)
+    assert(assistant.tool_calls?.length === 1,
+      `tool_calls=${JSON.stringify(assistant.tool_calls)}`)
+    assert(assistant.tool_calls?.[0]?.id === 'toolu_compat_call_answered',
+      `tool_call_id=${assistant.tool_calls?.[0]?.id}`)
+    assert(body.messages[2]?.role === 'tool', `expected kept tool message, got ${body.messages[2]?.role}`)
+    assert(body.messages[2]?.name === 'Skill', `tool name=${body.messages[2]?.name}`)
+    assert(body.messages[3]?.role === 'user', `expected next user message, got ${body.messages[3]?.role}`)
+  })
+  test('mistral drops orphan tool results after user messages', () => {
+    const body = mkBody('devstral-latest', {
+      messages: [
+        { role: 'user', content: 'run a skill' },
+        { role: 'tool', tool_call_id: 'toolu_orphan', content: 'loaded' },
+      ],
+    })
+
+    TRANSFORMERS.mistral.transformRequest(body, mkCtx('devstral-latest'))
+
+    assert(body.messages.length === 1, `messages=${JSON.stringify(body.messages)}`)
+    assert(!body.messages.some(message => message.role === 'tool'), 'orphan tool message was kept')
+  })
   test('mistral does NOT support strict mode', () => {
     assert(!TRANSFORMERS.mistral.supportsStrictMode(),
       'mistral wrongly advertises strict mode')
+  })
+  test('mistral stamps prompt_cache_key from session id without cache_control markers', () => {
+    const body = mkBody('mistral-large-latest')
+    TRANSFORMERS.mistral.transformRequest(body, {
+      ...mkCtx('mistral-large-latest'),
+      sessionId: 'session-fixed',
+    })
+    assert(body.prompt_cache_key === 'session-fixed', `prompt_cache_key=${body.prompt_cache_key}`)
+    assert(TRANSFORMERS.mistral.cacheControlMode('mistral-large-latest') === 'none',
+      'mistral should not use Anthropic-style cache_control markers')
+  })
+  test('mistral sets reasoning_effort for reasoning-capable models', () => {
+    const body = mkBody('mistral-medium-3-5')
+    TRANSFORMERS.mistral.transformRequest(body, mkCtx('mistral-medium-3-5', true))
+    assert(body.reasoning_effort === 'high', `reasoning_effort=${body.reasoning_effort}`)
+  })
+  test('mistral keeps Magistral thinking-template injection', () => {
+    const body = mkBody('magistral-medium-latest')
+    TRANSFORMERS.mistral.transformRequest(body, mkCtx('magistral-medium-latest', true))
+    assert(body.messages[0]?.role === 'system', `first role=${body.messages[0]?.role}`)
+    assert(
+      typeof body.messages[0]?.content === 'string'
+        && body.messages[0].content.includes('draft your thinking process'),
+      'missing Magistral thinking template',
+    )
+  })
+  test('mistral advertises live-first catalog with documented fallback rows', () => {
+    assert(TRANSFORMERS.mistral.preferLiveModelCatalog?.() === true,
+      'expected live /models to be preferred')
+    const ids = (TRANSFORMERS.mistral.staticCatalog?.() ?? []).map(m => m.id)
+    for (const id of ['mistral-medium-3-5', 'devstral-latest', 'devstral-medium-latest', 'mistral-small-latest', 'codestral-latest']) {
+      assert(ids.includes(id), `mistral catalog missing ${id}`)
+    }
+    assert(!ids.includes('ministral-3b-latest'), 'mistral coding catalog should not include small non-coding fallback models')
+  })
+  test('mistral filters live catalog to current coding models when available', () => {
+    const filtered = TRANSFORMERS.mistral.filterModelCatalog?.([
+      { id: 'voxtral-mini-2507' },
+      { id: 'ministral-3b-latest' },
+      { id: 'devstral-latest' },
+      { id: 'devstral-medium-latest' },
+      { id: 'mistral-medium-3-5' },
+      { id: 'codestral-latest' },
+    ]) ?? []
+    const ids = filtered.map(model => model.id)
+    assert(ids.includes('devstral-latest'), 'expected devstral-latest kept')
+    assert(ids.includes('devstral-medium-latest'), 'expected devstral-medium-latest kept')
+    assert(ids.includes('mistral-medium-3-5'), 'expected mistral-medium-3-5 kept')
+    assert(ids.includes('codestral-latest'), 'expected codestral-latest kept')
+    assert(!ids.includes('voxtral-mini-2507'), 'non-chat/coding model leaked')
+    assert(!ids.includes('ministral-3b-latest'), 'small non-coding fallback model leaked')
+  })
+  test('mistral prefers edit_block for coding-oriented models', () => {
+    for (const model of ['codestral-latest', 'devstral-latest', 'magistral-medium-latest', 'mistral-medium-3-5']) {
+      assert(TRANSFORMERS.mistral.preferredEditFormat(model) === 'edit_block',
+        `${model} did not resolve to edit_block`)
+    }
   })
 
   // ── NIM / Ollama: stream_options ────────────────────────────────
@@ -701,6 +802,10 @@ function main(): void {
   })
   test('glm-5 is reasoning-capable', () => {
     const caps = resolveCapabilities('glm', 'glm-5')
+    assert(caps.supportsReasoning, 'should support reasoning')
+  })
+  test('mistral-small is reasoning-capable', () => {
+    const caps = resolveCapabilities('mistral', 'mistral-small-latest')
     assert(caps.supportsReasoning, 'should support reasoning')
   })
   test('plain llama-3.1 is NOT reasoning-capable', () => {

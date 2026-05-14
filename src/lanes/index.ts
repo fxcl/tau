@@ -79,6 +79,7 @@ export function initLanes(opts?: {
   groqApiKey?: string
   // Mistral
   mistralApiKey?: string
+  mistralBaseUrl?: string
   // NVIDIA NIM
   nimApiKey?: string
   // Ollama
@@ -180,7 +181,7 @@ export function initLanes(opts?: {
     moonshot: opts?.moonshotApiKey ? { apiKey: opts.moonshotApiKey, baseUrl: opts.moonshotBaseUrl } : undefined,
     minimax: opts?.minimaxApiKey ? { apiKey: opts.minimaxApiKey, baseUrl: opts.minimaxBaseUrl } : undefined,
     groq: opts?.groqApiKey ? { apiKey: opts.groqApiKey } : undefined,
-    mistral: opts?.mistralApiKey ? { apiKey: opts.mistralApiKey } : undefined,
+    mistral: opts?.mistralApiKey ? { apiKey: opts.mistralApiKey, baseUrl: opts.mistralBaseUrl } : undefined,
     nim: opts?.nimApiKey ? { apiKey: opts.nimApiKey } : undefined,
     ollama: opts?.ollamaApiKey || opts?.ollamaBaseUrl
       ? { apiKey: opts?.ollamaApiKey ?? '', baseUrl: opts?.ollamaBaseUrl }

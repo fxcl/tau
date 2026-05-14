@@ -72,6 +72,11 @@ const PROVIDER_META: Partial<Record<APIProvider, ProviderMeta>> = {
     getKeyUrl: 'https://console.groq.com/keys',
     supportsOAuth: false,
   },
+  mistral: {
+    envVar: 'MISTRAL_API_KEY',
+    getKeyUrl: 'https://console.mistral.ai/api-keys',
+    supportsOAuth: false,
+  },
   nim: {
     envVar: 'NIM_API_KEY',
     keyPrefix: 'nvapi-',
@@ -179,6 +184,10 @@ async function _testApiKey(
         url = 'https://api.groq.com/openai/v1/models'
         headers = { Authorization: `Bearer ${key}` }
         break
+      case 'mistral':
+        url = 'https://api.mistral.ai/v1/models'
+        headers = { Authorization: `Bearer ${key}` }
+        break
       case 'deepseek':
         url = 'https://api.deepseek.com/v1/models'
         headers = { Authorization: `Bearer ${key}` }
@@ -242,6 +251,7 @@ function reloadSavedApiKeyInRuntime(provider: APIProvider): void {
   if (
     provider === 'deepseek' ||
     provider === 'glm' ||
+    provider === 'mistral' ||
     provider === 'moonshot' ||
     provider === 'nim' ||
     provider === 'openrouter' ||

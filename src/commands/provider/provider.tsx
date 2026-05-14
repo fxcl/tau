@@ -106,6 +106,7 @@ const MANAGEABLE_PROVIDERS = [
   'antigravity',
   'openrouter',
   'agentrouter',
+  'mistral',
   'nim',
   'deepseek',
   'glm',

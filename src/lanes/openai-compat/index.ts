@@ -1,7 +1,7 @@
 /**
  * OpenAI-Compatible Lane — Entry Point
  *
- * Handles: DeepSeek, GLM, Moonshot, Groq, NIM, Ollama, OpenRouter, and any other
+ * Handles: DeepSeek, GLM, Moonshot, Groq, Mistral, NIM, Ollama, OpenRouter, and any other
  * provider that speaks OpenAI Chat Completions format.
  *
  * Each provider is registered with its own API key and base URL.
@@ -108,7 +108,10 @@ export function initOpenAICompatLane(providers?: {
   if (mistralKey) {
     openaiCompatLane.registerProvider(
       'mistral', mistralKey,
-      p.mistral?.baseUrl ?? 'https://api.mistral.ai/v1',
+      p.mistral?.baseUrl
+        ?? process.env.MISTRAL_BASE_URL
+        ?? process.env.MISTRAL_API_BASE_URL
+        ?? 'https://api.mistral.ai/v1',
     )
   }
 

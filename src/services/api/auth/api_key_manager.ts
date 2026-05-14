@@ -151,6 +151,7 @@ function detectKeyFormat(provider: string, key: string): string {
     openrouter: 'sk-or-',
     agentrouter: 'sk-',
     groq: 'gsk_',
+    mistral: '',
     nim: 'nvapi-',
     gemini: 'AIza',
     deepseek: 'sk-',
@@ -175,6 +176,7 @@ const KEY_VALIDATIONS: Record<string, KeyValidation> = {
   openrouter: { prefix: 'sk-or-', minLength: 20, displayName: 'OpenRouter' },
   agentrouter: { prefix: 'sk-', minLength: 16, displayName: 'AgentRouter' },
   groq: { prefix: 'gsk_', minLength: 20, displayName: 'Groq' },
+  mistral: { prefix: '', minLength: 20, displayName: 'Mistral' },
   nim: { prefix: 'nvapi-', minLength: 20, displayName: 'NVIDIA NIM' },
   gemini: { prefix: 'AIza', minLength: 30, displayName: 'Gemini' },
   deepseek: { prefix: 'sk-', minLength: 20, displayName: 'DeepSeek' },
@@ -277,6 +279,12 @@ export function deleteAllProviderCredentials(provider: string): void {
     void import('../providers/providerShim.js')
       .then(({ reloadOpenAICompatProviderAuth }) =>
         reloadOpenAICompatProviderAuth('glm'),
+      )
+      .catch(() => {})
+  } else if (provider === 'mistral') {
+    void import('../providers/providerShim.js')
+      .then(({ reloadOpenAICompatProviderAuth }) =>
+        reloadOpenAICompatProviderAuth('mistral'),
       )
       .catch(() => {})
   } else if (provider === 'moonshot') {

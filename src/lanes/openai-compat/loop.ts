@@ -148,6 +148,12 @@ interface OpenAIChatRequest {
 
 interface CompatCatalogModel extends OpenRouterCatalogModel {
   owned_by?: string
+  max_context_length?: number
+  capabilities?: {
+    completion_chat?: boolean
+    function_calling?: boolean
+    vision?: boolean
+  }
 }
 
 // ─── Lane Implementation ─────────────────────────────────────────
@@ -273,7 +279,7 @@ export class OpenAICompatLane implements Lane {
     const provider = cfg.provider
     const isLocal = isLocalBaseUrl(cfg.baseUrl)
     const cacheSessionId =
-      provider === 'copilot' || provider === 'openrouter' || provider === 'agentrouter' || provider === 'moonshot'
+      provider === 'copilot' || provider === 'openrouter' || provider === 'agentrouter' || provider === 'moonshot' || provider === 'mistral'
         ? sessionId
         : undefined
 
@@ -501,6 +507,7 @@ export class OpenAICompatLane implements Lane {
             outputTokens = chunk.usage.completion_tokens ?? outputTokens
             reportedCachedInputTokens =
               chunk.usage.prompt_tokens_details?.cached_tokens
+              ?? (provider === 'moonshot' ? chunk.usage.cached_tokens : undefined)
               ?? chunk.usage.prompt_cache_hit_tokens
               ?? reportedCachedInputTokens
             cacheWriteTokens =
@@ -813,6 +820,10 @@ function toCompatCatalogModel(
     return toOpenRouterModelInfo(model)
   }
 
+  if (providerName === 'mistral') {
+    return toMistralCatalogModel(model)
+  }
+
   if (typeof model.id !== 'string' || model.id.length === 0) {
     return null
   }
@@ -935,6 +946,44 @@ function parseProviderErrorPayload(raw: string): ProviderErrorPayload | null {
   } catch {
     return null
   }
+}
+
+function toMistralCatalogModel(model: CompatCatalogModel): ModelInfo | null {
+  if (typeof model.id !== 'string' || model.id.length === 0) {
+    return null
+  }
+
+  const capabilities = model.capabilities
+  if (capabilities?.completion_chat === false) {
+    return null
+  }
+
+  const tags: string[] = []
+  if (capabilities?.function_calling === true) tags.push('tools')
+  if (isMistralReasoningModelId(model.id)) tags.push('reasoning')
+
+  return {
+    id: model.id,
+    name: typeof model.name === 'string' && model.name.length > 0
+      ? model.name
+      : model.id,
+    contextWindow: model.max_context_length ?? model.context_length,
+    supportsToolCalling: capabilities?.function_calling,
+    tags: tags.length > 0 ? tags : undefined,
+    ...(typeof model.owned_by === 'string' && model.owned_by.length > 0
+      ? { provider: model.owned_by }
+      : { provider: 'Mistral' }),
+  }
+}
+
+function isMistralReasoningModelId(modelId: string): boolean {
+  const m = modelId.toLowerCase()
+  return (
+    m.includes('magistral') ||
+    m.startsWith('mistral-small') ||
+    m === 'mistral-medium-3-5' ||
+    m === 'mistral-medium-latest'
+  )
 }
 
 function normalizeBaseUrl(baseUrl: string): string {

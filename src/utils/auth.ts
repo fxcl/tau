@@ -1751,6 +1751,7 @@ export const PROVIDER_AUTH_SUPPORT: Record<string, ProviderAuthMethod[]> = {
   openrouter:  ['api_key'],
   agentrouter: ['api_key'],
   groq:        ['api_key'],
+  mistral:     ['api_key'],
   nim:         ['api_key'],
   deepseek:    ['api_key'],
   glm:         ['api_key'],
@@ -1815,6 +1816,7 @@ function _getApiKeyDirect(provider: APIProvider): string | null {
     case 'openrouter':  return process.env.OPENROUTER_API_KEY ?? _loadStoredKey('openrouter')
     case 'agentrouter': return process.env.AGENT_ROUTER_TOKEN ?? process.env.AGENTROUTER_API_KEY ?? _loadStoredKey('agentrouter')
     case 'groq':        return process.env.GROQ_API_KEY ?? _loadStoredKey('groq')
+    case 'mistral':     return process.env.MISTRAL_API_KEY ?? _loadStoredKey('mistral')
     case 'nim':         return process.env.NIM_API_KEY ?? _loadStoredKey('nim')
     case 'gemini':      return process.env.GEMINI_API_KEY ?? _loadStoredKey('gemini')
     case 'antigravity': return null  // OAuth-only provider
@@ -1930,6 +1932,7 @@ export function getProviderBaseUrl(provider: APIProvider): string {
     case 'openrouter':  return 'https://openrouter.ai/api/v1'
     case 'agentrouter': return process.env.AGENTROUTER_BASE_URL ?? 'https://agentrouter.org/v1'
     case 'groq':        return 'https://api.groq.com/openai/v1'
+    case 'mistral':     return process.env.MISTRAL_BASE_URL ?? process.env.MISTRAL_API_BASE_URL ?? 'https://api.mistral.ai/v1'
     case 'nim':         return process.env.NIM_BASE_URL ?? 'https://integrate.api.nvidia.com/v1'
     case 'gemini':      return 'https://generativelanguage.googleapis.com/v1beta'
     case 'antigravity': return 'https://cloudcode-pa.googleapis.com/v1internal'
@@ -1958,6 +1961,7 @@ export function isUsingThirdPartyLLM(): boolean {
     isEnvTruthy(process.env.CLAUDE_CODE_USE_OPENROUTER) ||
     isEnvTruthy(process.env.CLAUDE_CODE_USE_AGENTROUTER) ||
     isEnvTruthy(process.env.CLAUDE_CODE_USE_GROQ) ||
+    isEnvTruthy(process.env.CLAUDE_CODE_USE_MISTRAL) ||
     isEnvTruthy(process.env.CLAUDE_CODE_USE_NIM) ||
     isEnvTruthy(process.env.CLAUDE_CODE_USE_DEEPSEEK) ||
     isEnvTruthy(process.env.CLAUDE_CODE_USE_GLM) ||
@@ -2009,6 +2013,7 @@ function _getApiKeyEnvName(provider: APIProvider): string {
     case 'openrouter':  return 'OPENROUTER_API_KEY'
     case 'agentrouter': return 'AGENT_ROUTER_TOKEN or AGENTROUTER_API_KEY'
     case 'groq':        return 'GROQ_API_KEY'
+    case 'mistral':     return 'MISTRAL_API_KEY'
     case 'nim':         return 'NIM_API_KEY'
     case 'gemini':      return 'GEMINI_API_KEY'
     case 'antigravity': return '(OAuth only — no API key)'
@@ -2034,6 +2039,7 @@ function _validateKeyFormat(provider: APIProvider, key: string): { valid: boolea
     openrouter:  { prefix: 'sk-or-', minLen: 20 },
     agentrouter: { minLen: 16 },
     groq:        { prefix: 'gsk_', minLen: 20 },
+    mistral:     { minLen: 20 },
     nim:         { prefix: 'nvapi-', minLen: 20 },
     gemini:      { minLen: 10 },
     deepseek:    { prefix: 'sk-', minLen: 20 },

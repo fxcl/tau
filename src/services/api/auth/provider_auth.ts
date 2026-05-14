@@ -300,6 +300,7 @@ function _envVarName(provider: APIProvider): string {
     openrouter: 'OPENROUTER_API_KEY',
     agentrouter: 'AGENT_ROUTER_TOKEN',
     groq: 'GROQ_API_KEY',
+    mistral: 'MISTRAL_API_KEY',
     nim: 'NIM_API_KEY',
     deepseek: 'DEEPSEEK_API_KEY',
     glm: 'GLM_API_KEY',

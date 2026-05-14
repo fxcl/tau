@@ -39,6 +39,10 @@ const MINIMAX_BASE_URL = process.env.MINIMAX_BASE_URL
   ?? process.env.MINIMAX_API_BASE_URL
   ?? 'https://api.minimax.io/v1'
 
+const MISTRAL_BASE_URL = process.env.MISTRAL_BASE_URL
+  ?? process.env.MISTRAL_API_BASE_URL
+  ?? 'https://api.mistral.ai/v1'
+
 export interface TierModelSet {
   opus: string    // Best reasoning / most capable model
   sonnet: string  // Balanced quality/speed for everyday tasks
@@ -359,6 +363,33 @@ export const PROVIDER_CONFIGS: Record<string, ProviderModelConfig> = {
         opus:   process.env.GROQ_MODEL_OPUS   ?? 'openai/gpt-oss-120b',
         sonnet: process.env.GROQ_MODEL_SONNET ?? 'qwen/qwen3-32b',
         haiku:  process.env.GROQ_MODEL_HAIKU  ?? 'deepseek-r1-distill-llama-70b',
+      },
+    },
+  },
+
+  mistral: {
+    displayName: 'Mistral',
+    baseUrl: MISTRAL_BASE_URL,
+    authType: 'bearer',
+    apiKeyEnv: 'MISTRAL_API_KEY',
+    supportsStreaming: true,
+    supportsToolCalling: true,
+    defaultTier: 'pro',
+    tiers: {
+      free: {
+        opus:   process.env.MISTRAL_MODEL_OPUS_FREE   ?? 'mistral-small-latest',
+        sonnet: process.env.MISTRAL_MODEL_SONNET_FREE ?? 'mistral-small-latest',
+        haiku:  process.env.MISTRAL_MODEL_HAIKU_FREE  ?? 'mistral-small-latest',
+      },
+      pro: {
+        opus:   process.env.MISTRAL_MODEL_OPUS   ?? 'mistral-medium-3-5',
+        sonnet: process.env.MISTRAL_MODEL_SONNET ?? 'devstral-latest',
+        haiku:  process.env.MISTRAL_MODEL_HAIKU  ?? 'mistral-small-latest',
+      },
+      plus: {
+        opus:   process.env.MISTRAL_MODEL_OPUS   ?? 'mistral-medium-3-5',
+        sonnet: process.env.MISTRAL_MODEL_SONNET ?? 'devstral-latest',
+        haiku:  process.env.MISTRAL_MODEL_HAIKU  ?? 'mistral-small-latest',
       },
     },
   },

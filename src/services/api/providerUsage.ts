@@ -49,6 +49,7 @@ const DOCS = {
   openai: 'https://platform.openai.com/docs/api-reference/usage/costs',
   openrouter: 'https://openrouter.ai/docs/api-reference/credits/get-credits',
   deepseek: 'https://api-docs.deepseek.com/api/get-user-balance/',
+  mistral: 'https://docs.mistral.ai/api/endpoint/beta/observability/chat_completion_events',
   glm: 'https://bigmodel.cn/finance/expensebill/list',
   moonshot: 'https://platform.kimi.ai/docs/api/balance',
   minimax: 'https://platform.minimax.io/docs/token-plan/faq',
@@ -128,6 +129,7 @@ const REPORTERS: Reporter[] = [
   reportAntigravity,
   reportOpenRouter,
   reportDeepSeek,
+  reportMistral,
   reportGLM,
   reportMoonshot,
   reportMiniMax,
@@ -168,6 +170,7 @@ function nameToProvider(name: string): ProviderUsageId {
     case 'groq': return 'groq'
     case 'nim': return 'nim'
     case 'deepseek': return 'deepseek'
+    case 'mistral': return 'mistral'
     case 'glm': return 'glm'
     case 'moonshot': return 'moonshot'
     case 'minimax': return 'minimax'
@@ -623,6 +626,102 @@ async function reportDeepSeek(): Promise<ProviderUsageReport> {
     detail: 'Set CLAUDEX_USAGE_DEEPSEEK_BUDGET_USD to turn remaining balance into a percent-used bar.',
     metrics,
     docsUrl: DOCS.deepseek,
+  }
+}
+
+async function reportMistral(): Promise<ProviderUsageReport> {
+  const apiKey = getProviderApiKey('mistral')
+  const links: UsageLink[] = [
+    {
+      label: 'Mistral Admin',
+      url: 'https://admin.mistral.ai/',
+    },
+    {
+      label: 'Mistral limits',
+      url: 'https://admin.mistral.ai/plateforme/limits',
+    },
+  ]
+
+  if (!apiKey) {
+    return {
+      ...baseReport(
+        'mistral',
+        'not_configured',
+        'none',
+        'Mistral observability',
+        'No Mistral API key is configured.',
+      ),
+      docsUrl: DOCS.mistral,
+      links,
+    }
+  }
+
+  const baseUrl = getProviderBaseUrl('mistral').replace(/\/+$/, '')
+  try {
+    const data = await fetchMistralObservabilityUsage(apiKey, baseUrl)
+    const parsed = parseMistralObservabilityUsage(data)
+    if (parsed) {
+      return {
+        ...baseReport(
+          'mistral',
+          'ok',
+          'api_key',
+          'Mistral observability',
+          parsed.summary,
+        ),
+        detail: parsed.detail,
+        metrics: parsed.metrics,
+        docsUrl: DOCS.mistral,
+        links,
+      }
+    }
+
+    return {
+      ...baseReport(
+        'mistral',
+        'ok',
+        'api_key',
+        'Mistral observability',
+        'Mistral observability returned no recent chat completion usage.',
+      ),
+      detail: 'The API key is valid; recent usage may be empty or unavailable for this workspace.',
+      docsUrl: DOCS.mistral,
+      links,
+    }
+  } catch (observabilityError) {
+    try {
+      await fetchJson(`${baseUrl}/models`, {
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          Accept: 'application/json',
+        },
+      })
+      return {
+        ...baseReport(
+          'mistral',
+          'connected',
+          'api_key',
+          'Mistral API / Admin usage',
+          'Mistral API key is configured; live observability usage is unavailable for this workspace.',
+        ),
+        detail: `Observability request failed: ${messageFromError(observabilityError)}.`,
+        docsUrl: DOCS.mistral,
+        links,
+      }
+    } catch (modelsError) {
+      return {
+        ...baseReport(
+          'mistral',
+          'error',
+          'api_key',
+          'Mistral observability',
+          'Mistral usage request failed.',
+        ),
+        detail: `Observability: ${messageFromError(observabilityError)}. Models: ${messageFromError(modelsError)}.`,
+        docsUrl: DOCS.mistral,
+        links,
+      }
+    }
   }
 }
 
@@ -1239,6 +1338,82 @@ function parseDeepSeekBalances(data: unknown): Array<{
     if (total === null) return []
     return [{ currency, total, granted, toppedUp }]
   })
+}
+
+async function fetchMistralObservabilityUsage(apiKey: string, baseUrl: string): Promise<unknown> {
+  const url = new URL(`${baseUrl}/observability/chat-completion-events/search`)
+  url.searchParams.set('page_size', '100')
+  return fetchJson(url.toString(), {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      search_params: {
+        filters: null,
+      },
+      extra_fields: ['model'],
+    }),
+  })
+}
+
+function parseMistralObservabilityUsage(data: unknown): {
+  summary: string
+  detail?: string
+  metrics: UsageMetric[]
+} | null {
+  const root = asRecord(data)
+  const completionEvents = asRecord(root?.completion_events)
+  const results = Array.isArray(completionEvents?.results) ? completionEvents.results : []
+  const rows = results
+    .map((item) => asRecord(item))
+    .filter((item): item is Record<string, unknown> => item !== null)
+  if (rows.length === 0) return null
+
+  let inputTokens = 0
+  let outputTokens = 0
+  let latestTime = 0
+  const models = new Set<string>()
+
+  for (const row of rows) {
+    inputTokens += readNumber(row.nb_input_tokens) ?? 0
+    outputTokens += readNumber(row.nb_output_tokens) ?? 0
+
+    const createdAt = readString(row.created_at)
+    if (createdAt) {
+      const time = new Date(createdAt).getTime()
+      if (Number.isFinite(time) && time > latestTime) latestTime = time
+    }
+
+    const extraFields = asRecord(row.extra_fields)
+    const model = readString(extraFields?.model)
+      ?? readString(extraFields?.model_name)
+      ?? readString(row.model)
+      ?? readString(row.model_name)
+    if (model) models.add(model)
+  }
+
+  const totalTokens = inputTokens + outputTokens
+  const modelSummary = summarizeSet(models)
+  const latestEvent = latestTime > 0 ? new Date(latestTime).toISOString() : null
+  const detailParts = [
+    `Input tokens: ${formatNumber(inputTokens)}.`,
+    `Output tokens: ${formatNumber(outputTokens)}.`,
+    modelSummary ? `Models: ${modelSummary}.` : null,
+    latestEvent ? `Latest event: ${latestEvent}.` : null,
+  ].filter((part): part is string => part !== null)
+
+  return {
+    summary: `${formatNumber(rows.length)} recent chat completion events; ${formatNumber(totalTokens)} tokens.`,
+    detail: detailParts.join(' '),
+    metrics: [{
+      label: 'Recent chat completions',
+      summary: `${formatNumber(rows.length)} events; ${formatNumber(totalTokens)} tokens`,
+      detail: `${formatNumber(inputTokens)} input tokens, ${formatNumber(outputTokens)} output tokens`,
+    }],
+  }
 }
 
 function parseMoonshotBalance(data: unknown): {
@@ -1889,6 +2064,14 @@ function formatNumber(value: number): string {
   return new Intl.NumberFormat('en-US', {
     maximumFractionDigits: 2,
   }).format(value)
+}
+
+function summarizeSet(values: Set<string>, limit = 4): string | null {
+  if (values.size === 0) return null
+  const items = Array.from(values).sort()
+  const shown = items.slice(0, limit).join(', ')
+  const hidden = items.length - limit
+  return hidden > 0 ? `${shown}, and ${hidden} more` : shown
 }
 
 function humanize(value: string): string {

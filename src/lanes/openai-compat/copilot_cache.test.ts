@@ -110,6 +110,138 @@ async function captureCopilotRequest(
   }
 }
 
+async function captureMistralRequest(sessionId?: string): Promise<{
+  request: CapturedRequest
+  events: AnthropicStreamEvent[]
+}> {
+  const lane = new OpenAICompatLane()
+  lane.registerProvider('mistral', 'mistral-token', 'https://api.mistral.ai/v1')
+
+  const oldFetch = globalThis.fetch
+  let request: CapturedRequest | null = null
+
+  globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    request = {
+      url: String(url),
+      headers: init?.headers as Record<string, string>,
+      body: JSON.parse(String(init?.body ?? '{}')) as Record<string, any>,
+    }
+    const sse = [
+      {
+        id: 'chatcmpl-mistral-test',
+        object: 'chat.completion.chunk',
+        model: 'mistral-large-latest',
+        choices: [{ index: 0, delta: { content: 'ok' }, finish_reason: null }],
+      },
+      {
+        id: 'chatcmpl-mistral-test',
+        object: 'chat.completion.chunk',
+        model: 'mistral-large-latest',
+        choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+        usage: {
+          prompt_tokens: 128,
+          completion_tokens: 5,
+          total_tokens: 133,
+          prompt_tokens_details: {
+            cached_tokens: 64,
+          },
+        },
+      },
+    ].map(chunk => `data: ${JSON.stringify(chunk)}\n\n`).join('') + 'data: [DONE]\n\n'
+
+    return new Response(sse, {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' },
+    })
+  }) as typeof fetch
+
+  try {
+    const events: AnthropicStreamEvent[] = []
+    const stream = lane.streamAsProvider({
+      model: 'mistral-large-latest',
+      messages: [{ role: 'user', content: 'hello' }],
+      system: 'stable system prompt',
+      tools: [],
+      max_tokens: 128,
+      signal: new AbortController().signal,
+      sessionId,
+      providerHint: 'mistral',
+    })
+
+    for await (const ev of stream) events.push(ev)
+    assert(request !== null, 'fetch was not called')
+    return { request, events }
+  } finally {
+    globalThis.fetch = oldFetch
+    lane.unregisterProvider('mistral')
+  }
+}
+
+async function captureMoonshotRequest(sessionId?: string): Promise<{
+  request: CapturedRequest
+  events: AnthropicStreamEvent[]
+}> {
+  const lane = new OpenAICompatLane()
+  lane.registerProvider('moonshot', 'moonshot-token', 'https://api.moonshot.ai/v1')
+
+  const oldFetch = globalThis.fetch
+  let request: CapturedRequest | null = null
+
+  globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    request = {
+      url: String(url),
+      headers: init?.headers as Record<string, string>,
+      body: JSON.parse(String(init?.body ?? '{}')) as Record<string, any>,
+    }
+    const sse = [
+      {
+        id: 'chatcmpl-moonshot-test',
+        object: 'chat.completion.chunk',
+        model: 'kimi-k2.6',
+        choices: [{ index: 0, delta: { content: 'ok' }, finish_reason: null }],
+      },
+      {
+        id: 'chatcmpl-moonshot-test',
+        object: 'chat.completion.chunk',
+        model: 'kimi-k2.6',
+        choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+        usage: {
+          prompt_tokens: 160,
+          completion_tokens: 5,
+          total_tokens: 165,
+          cached_tokens: 96,
+        },
+      },
+    ].map(chunk => `data: ${JSON.stringify(chunk)}\n\n`).join('') + 'data: [DONE]\n\n'
+
+    return new Response(sse, {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' },
+    })
+  }) as typeof fetch
+
+  try {
+    const events: AnthropicStreamEvent[] = []
+    const stream = lane.streamAsProvider({
+      model: 'kimi-k2.6',
+      messages: [{ role: 'user', content: 'hello' }],
+      system: 'stable system prompt',
+      tools: [],
+      max_tokens: 128,
+      signal: new AbortController().signal,
+      sessionId,
+      providerHint: 'moonshot',
+    })
+
+    for await (const ev of stream) events.push(ev)
+    assert(request !== null, 'fetch was not called')
+    return { request, events }
+  } finally {
+    globalThis.fetch = oldFetch
+    lane.unregisterProvider('moonshot')
+  }
+}
+
 async function captureOpenRouterRequestWithSessionId(cacheRetention?: string): Promise<{
   request: CapturedRequest
   events: AnthropicStreamEvent[]
@@ -295,6 +427,46 @@ async function main(): Promise<void> {
     assert(finalDelta?.usage?.cache_read_input_tokens === 50,
       `cache_read_input_tokens=${finalDelta?.usage?.cache_read_input_tokens}`)
     assert(finalDelta?.usage?.cache_creation_input_tokens === 20,
+      `cache_creation_input_tokens=${finalDelta?.usage?.cache_creation_input_tokens}`)
+  })
+
+  await test('mistral sends prompt_cache_key from session id', async () => {
+    const { request } = await captureMistralRequest('session-fixed')
+    assert(request.url === 'https://api.mistral.ai/v1/chat/completions', `url=${request.url}`)
+    assert(request.body.prompt_cache_key === 'session-fixed',
+      `prompt_cache_key=${request.body.prompt_cache_key}`)
+    assert(request.body.prompt_cache_retention === undefined,
+      `prompt_cache_retention=${request.body.prompt_cache_retention}`)
+    const serialized = JSON.stringify(request.body.messages)
+    assert(!serialized.includes('cache_control'), `cache_control leaked into Mistral request: ${serialized}`)
+  })
+
+  await test('mistral maps cached_tokens into cache read usage', async () => {
+    const { events } = await captureMistralRequest('session-fixed')
+    const finalDelta = events.findLast(ev => ev.type === 'message_delta')
+    assert(finalDelta?.usage?.input_tokens === 64, `input_tokens=${finalDelta?.usage?.input_tokens}`)
+    assert(finalDelta?.usage?.cache_read_input_tokens === 64,
+      `cache_read_input_tokens=${finalDelta?.usage?.cache_read_input_tokens}`)
+    assert(finalDelta?.usage?.cache_creation_input_tokens === undefined,
+      `cache_creation_input_tokens=${finalDelta?.usage?.cache_creation_input_tokens}`)
+  })
+
+  await test('moonshot sends prompt_cache_key from session id', async () => {
+    const { request } = await captureMoonshotRequest('session-fixed')
+    assert(request.url === 'https://api.moonshot.ai/v1/chat/completions', `url=${request.url}`)
+    assert(request.body.prompt_cache_key === 'session-fixed',
+      `prompt_cache_key=${request.body.prompt_cache_key}`)
+    assert(request.body.prompt_cache_retention === undefined,
+      `prompt_cache_retention=${request.body.prompt_cache_retention}`)
+  })
+
+  await test('moonshot maps top-level cached_tokens into cache read usage', async () => {
+    const { events } = await captureMoonshotRequest('session-fixed')
+    const finalDelta = events.findLast(ev => ev.type === 'message_delta')
+    assert(finalDelta?.usage?.input_tokens === 64, `input_tokens=${finalDelta?.usage?.input_tokens}`)
+    assert(finalDelta?.usage?.cache_read_input_tokens === 96,
+      `cache_read_input_tokens=${finalDelta?.usage?.cache_read_input_tokens}`)
+    assert(finalDelta?.usage?.cache_creation_input_tokens === undefined,
       `cache_creation_input_tokens=${finalDelta?.usage?.cache_creation_input_tokens}`)
   })
 

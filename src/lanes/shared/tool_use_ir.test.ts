@@ -21,7 +21,7 @@
 
 import { LaneBackedProvider } from '../provider-bridge.js'
 import type { AnthropicStreamEvent } from '../../services/api/providers/base_provider.js'
-import type { Lane } from '../types.js'
+import type { Lane, LaneProviderCallParams } from '../types.js'
 
 let passed = 0
 let failed = 0
@@ -205,6 +205,46 @@ async function main(): Promise<void> {
     assert(typeof input === 'object', 'inline input preserved by bridge shim')
     // No hard assertion here — the bridge preserves inline, but the
     // claude.ts path strips it. The positive tests above are the guard.
+  })
+
+  await test('Mistral bridge forwards session id for prompt cache affinity', async () => {
+    let captured: LaneProviderCallParams | null = null
+    const lane: Lane = {
+      ...mockLane([]),
+      async *streamAsProvider(params: LaneProviderCallParams) {
+        captured = params
+        return {
+          input_tokens: 0, output_tokens: 0,
+          cache_read_tokens: 0, cache_write_tokens: 0, thinking_tokens: 0,
+        }
+      },
+    }
+    const prov = new LaneBackedProvider(lane, 'mistral')
+    const stream = await prov.stream({ model: 'mistral-large-latest', messages: [], max_tokens: 100 } as any)
+    for await (const _ of stream) {}
+    assert(captured?.providerHint === 'mistral', `providerHint=${captured?.providerHint}`)
+    assert(typeof captured?.sessionId === 'string' && captured.sessionId.length > 0,
+      `missing Mistral sessionId: ${captured?.sessionId}`)
+  })
+
+  await test('Moonshot bridge forwards session id for prompt cache affinity', async () => {
+    let captured: LaneProviderCallParams | null = null
+    const lane: Lane = {
+      ...mockLane([]),
+      async *streamAsProvider(params: LaneProviderCallParams) {
+        captured = params
+        return {
+          input_tokens: 0, output_tokens: 0,
+          cache_read_tokens: 0, cache_write_tokens: 0, thinking_tokens: 0,
+        }
+      },
+    }
+    const prov = new LaneBackedProvider(lane, 'moonshot')
+    const stream = await prov.stream({ model: 'kimi-k2.6', messages: [], max_tokens: 100 } as any)
+    for await (const _ of stream) {}
+    assert(captured?.providerHint === 'moonshot', `providerHint=${captured?.providerHint}`)
+    assert(typeof captured?.sessionId === 'string' && captured.sessionId.length > 0,
+      `missing Moonshot sessionId: ${captured?.sessionId}`)
   })
 
   console.log(`\n${passed} passed, ${failed} failed`)

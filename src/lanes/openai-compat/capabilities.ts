@@ -80,6 +80,7 @@ export function resolveCapabilities(
   const m = model.toLowerCase()
   const supportsTools = !NO_TOOL_SUPPORT.some(re => re.test(m))
   const supportsReasoning = REASONING_CAPABLE_MODELS.some(re => re.test(m))
+    || (provider === 'mistral' && isMistralReasoningModel(m))
 
   let editFormat: ModelCapabilities['editFormat']
   for (const { pattern, format } of EDIT_FORMAT_OVERRIDES) {
@@ -88,8 +89,25 @@ export function resolveCapabilities(
       break
     }
   }
+  if (!editFormat && provider === 'mistral' && isMistralEditBlockModel(m)) {
+    editFormat = 'edit_block'
+  }
 
   return { supportsTools, supportsReasoning, editFormat }
+}
+
+function isMistralEditBlockModel(model: string): boolean {
+  return model.includes('codestral')
+    || model.includes('devstral')
+    || model.includes('magistral')
+    || model === 'mistral-medium-3-5'
+}
+
+function isMistralReasoningModel(model: string): boolean {
+  return model.includes('magistral')
+    || model.startsWith('mistral-small')
+    || model === 'mistral-medium-3-5'
+    || model === 'mistral-medium-latest'
 }
 
 /**
