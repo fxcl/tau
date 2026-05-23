@@ -79,14 +79,6 @@ tau update
 **`/login` - Start here**
 Pick a provider, enter your credentials, and Tau saves the setup. No env variables, no config hunt.
 
-Before using **LM Studio**, start its local API server first:
-
-```bash
-lms server start
-```
-
-LM Studio defaults to `http://localhost:1234/v1` in Tau. Make sure LM Studio is running and a model is loaded before you select it in `/login`.
-
 ### Models
 
 **`/models` - Pick your model**
@@ -174,6 +166,13 @@ Setup is one step: `/login` → **E2B Security** → pick "Auth login" (opens th
 **`/pin` - Pin a constraint to every prompt**
 Save a sentence (or two) and Tau quietly appends it to the end of every message you send — a persistent reminder the model carries through the whole session without you retyping it. Use it for style rules ("reply in French"), guardrails ("never edit files outside `src/`"), or task focus ("stay on the auth refactor"). Cache-safe by design: only the dynamic tail of the user message changes, so your provider's prompt cache stays warm and the cost is a few extra tokens per turn.
 
+Before using **LM Studio**, start its local API server first:
+
+```bash
+lms server start
+```
+
+LM Studio defaults to `http://localhost:1234/v1` in Tau. Make sure LM Studio is running and a model is loaded before you select it in `/login`.
 
 
 ---
