@@ -64,6 +64,21 @@ function _resolveAPIProvider(): APIProvider {
   if (isEnvTruthy(process.env.CLAUDE_CODE_USE_MINIMAX))    return 'minimax'
   if (isEnvTruthy(process.env.CLAUDE_CODE_USE_OLLAMA))    return 'ollama'
   if (isEnvTruthy(process.env.CLAUDE_CODE_USE_LMSTUDIO))  return 'lmstudio'
+
+  // 3. Auto-detect OpenCode Zen from known free-tier models if the user passes
+  // them directly (e.g. `tau -m deepseek-v4-flash-free`) so they don't have to
+  // manually set CLAUDE_CODE_USE_OPENCODE=1.
+  const model = process.env.ANTHROPIC_MODEL || ''
+  if (
+    model.includes('deepseek-v4-flash-free') ||
+    model.includes('nemotron-3') ||
+    model.includes('qwen3.6-plus-free') ||
+    model.includes('minimax-m2.5-free') ||
+    model === 'big-pickle'
+  ) {
+    return 'opencode'
+  }
+
   return 'firstParty'
 }
 
