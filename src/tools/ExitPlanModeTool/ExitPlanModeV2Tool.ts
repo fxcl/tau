@@ -63,7 +63,7 @@ const permissionSetupModule = feature('TRANSCRIPT_CLASSIFIER')
  */
 const allowedPromptSchema = lazySchema(() =>
   z.object({
-    tool: z.enum(['Bash']).describe('The tool this prompt applies to'),
+    tool: z.string().describe('The tool this prompt applies to. Currently only "Bash" is acted upon; other values are accepted but ignored.'),
     prompt: z
       .string()
       .describe(

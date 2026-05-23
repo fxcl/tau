@@ -98,6 +98,7 @@ import {
   startToolExecutionSpan,
   startToolSpan,
 } from '../../utils/telemetry/sessionTracing.js'
+import { coerceToolInput } from '../../utils/coerceToolInput.js'
 import {
   formatError,
   formatZodValidationError,
@@ -626,7 +627,15 @@ async function checkPermissionsAndCallTool(
     !hasDynamicJsonSchema && tool.inputSchema instanceof Object && 'strip' in tool.inputSchema
       ? (tool.inputSchema as any).strip()
       : tool.inputSchema
-  const parsedInput = strippedSchema.safeParse(input)
+  // Coerce common model mistakes (stringified arrays, numbers, booleans)
+  // before Zod validation. Non-frontier models (especially free-tier
+  // OpenRouter models) frequently emit JSON strings for typed parameters
+  // because they lack strict schema adherence.
+  const coercedInput = coerceToolInput(
+    input as Record<string, unknown>,
+    tool.inputSchema,
+  )
+  const parsedInput = strippedSchema.safeParse(coercedInput)
   if (!parsedInput.success) {
     let errorContent = formatZodValidationError(
       tool.name,

@@ -42,6 +42,7 @@ import { userFacingName as fileEditUserFacingName } from '../FileEditTool/UI.js'
 import { trackGitOperations } from '../shared/gitOperationTracking.js';
 import { bashToolHasPermission, commandHasAnyCd, matchWildcardPattern, permissionRuleExtractPrefix } from './bashPermissions.js';
 import { appendBashFailureGuidance } from './bashFailureGuidance.js';
+import { checkBashRetryGuard, recordBashFailure, recordBashSuccess } from './bashRetryGuard.js';
 import { validateBashSyntax } from './bashSyntaxValidation.js';
 import { getPlatform } from '../../utils/platform.js';
 import { findGitBashPath } from '../../utils/windowsPaths.js';
@@ -537,6 +538,17 @@ export const BashTool = buildTool({
     return `Running ${desc}`;
   },
   async validateInput(input: BashToolInput): Promise<ValidationResult> {
+    // Retry guard: block repeated identical failing commands to prevent
+    // infinite loops. Non-frontier models retry the same broken command
+    // 30+ times without diagnosing. This forces diagnostic-first behavior.
+    const retryBlock = checkBashRetryGuard(input.command);
+    if (retryBlock !== null) {
+      return {
+        result: false,
+        message: retryBlock,
+        errorCode: 12
+      };
+    }
     if (feature('MONITOR_TOOL') && !isBackgroundTasksDisabled && !input.run_in_background) {
       const sleepPattern = detectBlockedSleepPattern(input.command);
       if (sleepPattern !== null) {
@@ -739,6 +751,8 @@ export const BashTool = buildTool({
         // already has the full output. Pass '' for stdout to avoid
         // duplication in getErrorParts() and processBashCommand.
         const outputWithFailureGuidance = appendBashFailureGuidance(input.command, result.code, outputWithSbFailures);
+        // Record failure for retry guard before throwing
+        recordBashFailure(input.command, result.code, outputWithSbFailures);
         throw new ShellError('', outputWithFailureGuidance, result.code, result.interrupted);
       }
       wasInterrupted = result.interrupted;
@@ -838,6 +852,8 @@ export const BashTool = buildTool({
       persistedOutputPath,
       persistedOutputSize
     };
+    // Record success for retry guard (clears failure tracking for this command)
+    recordBashSuccess(input.command);
     return {
       data
     };
