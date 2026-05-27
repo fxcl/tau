@@ -39,6 +39,13 @@ import { GREP_TOOL_NAME } from 'src/tools/GrepTool/prompt.js'
 import { hasEmbeddedSearchTools } from 'src/utils/embeddedTools.js'
 import { ASK_USER_QUESTION_TOOL_NAME } from '../tools/AskUserQuestionTool/prompt.js'
 import {
+  AFT_AST_SEARCH_TOOL_NAME,
+  AFT_DIAGNOSTICS_TOOL_NAME,
+  AFT_NAVIGATE_TOOL_NAME,
+  AFT_OUTLINE_TOOL_NAME,
+  AFT_ZOOM_TOOL_NAME,
+} from '../tools/AFTTool/constants.js'
+import {
   EXPLORE_AGENT,
   EXPLORE_AGENT_MIN_QUERIES,
 } from 'src/tools/AgentTool/built-in/exploreAgent.js'
@@ -274,6 +281,14 @@ function getUsingYourToolsSection(enabledTools: Set<string>): string {
   const taskToolName = [TASK_CREATE_TOOL_NAME, TODO_WRITE_TOOL_NAME].find(n =>
     enabledTools.has(n),
   )
+  const aftToolNames = [
+    AFT_OUTLINE_TOOL_NAME,
+    AFT_ZOOM_TOOL_NAME,
+    AFT_AST_SEARCH_TOOL_NAME,
+    AFT_NAVIGATE_TOOL_NAME,
+    AFT_DIAGNOSTICS_TOOL_NAME,
+  ]
+  const hasAftTools = aftToolNames.some(name => enabledTools.has(name))
 
   // In REPL mode, Read/Write/Edit/Glob/Grep/Bash/Agent are hidden from direct
   // use (REPL_ONLY_TOOLS). The "prefer dedicated tools over Bash" guidance is
@@ -302,6 +317,11 @@ function getUsingYourToolsSection(enabledTools: Set<string>): string {
           `To search for files use ${GLOB_TOOL_NAME} instead of find or ls`,
           `To search the content of files, use ${GREP_TOOL_NAME} instead of grep or rg`,
         ]),
+    ...(hasAftTools
+      ? [
+          `For codebase structure, symbol lookup, AST search, call graph analysis, or diagnostics, prefer the read-only AFT tools (${aftToolNames.join(', ')}) before reading whole files. Use AFTOutline first for orientation, AFTZoom for known symbols, and fall back to Read, Grep, Glob, or Bash when AFT is unavailable or insufficient.`,
+        ]
+      : []),
     `Reserve using the ${BASH_TOOL_NAME} exclusively for system commands and terminal operations that require shell execution. If you are unsure and there is a relevant dedicated tool, default to using the dedicated tool and only fallback on using the ${BASH_TOOL_NAME} tool for these if it is absolutely necessary.`,
   ]
 
