@@ -632,8 +632,8 @@ export type GlobalConfig = {
     effort?: string | number
   }>
 
-  // Whether /team-mode auto-orchestration is on. When true, each user prompt
-  // is run through the orchestrator with the configured per-role roster.
+  // Legacy persisted /team-mode toggle. Current sessions keep activation
+  // process-local so every fresh CLI session starts with team mode off.
   teamModeEnabled?: boolean
 
   // Configured roster for /team-mode. Each fixed role can be bound to a

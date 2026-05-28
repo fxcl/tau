@@ -4,11 +4,11 @@ import { tmpdir as osTmpdir } from 'os'
 import { join as nativeJoin } from 'path'
 import { join as posixJoin } from 'path/posix'
 import { createAndSaveSnapshot } from '../bash/ShellSnapshot.js'
+import { applyBashDefensiveRewrites } from '../bash/defensiveRewrites.js'
 import { formatShellPrefixCommand } from '../bash/shellPrefix.js'
 import { quote } from '../bash/shellQuote.js'
 import {
   quoteShellCommand,
-  rewriteWindowsNullRedirect,
   shouldAddStdinRedirect,
 } from '../bash/shellQuoting.js'
 import { logForDebugging } from '../debug.js'
@@ -119,11 +119,13 @@ export async function createBashShellProvider(
         ? posixJoin(opts.sandboxTmpDir!, `cwd-${opts.id}`)
         : nativeJoin(tmpdir, `claude-${opts.id}-cwd`)
 
-      // Defensive rewrite: the model sometimes emits Windows CMD-style `2>nul`
-      // redirects. In POSIX bash (including Git Bash on Windows), this creates a
-      // literal file named `nul` — a reserved device name that breaks git.
-      // See anthropics/claude-code#4928.
-      const normalizedCommand = rewriteWindowsNullRedirect(command)
+      // Defensive byte-level rewrites: strip invisible Unicode and stray
+      // control bytes (CRLF heredoc kill, ZWSP, BOM, etc.), and rewrite
+      // hallucinated cross-dialect redirects (CMD `2>nul`, PowerShell
+      // `2>$null`, Windows reserved names `con`/`prn`/`aux`) that would
+      // otherwise create broken files or "ambiguous redirect" errors. See
+      // utils/bash/defensiveRewrites.ts for the full set and rationale.
+      const normalizedCommand = applyBashDefensiveRewrites(command)
       const addStdinRedirect = shouldAddStdinRedirect(normalizedCommand)
       let quotedCommand = quoteShellCommand(normalizedCommand, addStdinRedirect)
 

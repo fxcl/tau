@@ -39,19 +39,19 @@ export const TEAM_MODE_ROLE_META: Record<TeamModeRoleId, TeamModeRoleMeta> = {
     id: 'orchestrator',
     label: 'Orchestrator',
     description:
-      'Plans the task end-to-end, decides which workers to spawn and in what order, and synthesizes their outputs into a single user-facing response. Does NOT write code or run shell commands itself — delegates ALL non-trivial work to the appropriate worker. Lives in the main session.',
+      'Coordinates the task end-to-end, decides which workers to spawn and in what order, and synthesizes their outputs into a single user-facing response. Does NOT write code, produce the specialist architecture plan, run verification commands, or absorb worker deliverables. Delegates ALL non-trivial work to the appropriate specialist. Lives in the main session.',
   },
   architect: {
     id: 'architect',
     label: 'Architect',
     description:
-      'Designs the solution BEFORE any code is written. Required for any task touching more than one file, introducing new modules, changing an API, or making non-obvious trade-offs. Deliverable: a written plan listing exact files to change, the change in each, dependencies, and acceptance criteria. Implementer reads this plan; do not skip it on multi-file work.',
+      'Owns solution design BEFORE any code is written. Required for any task touching more than one file, introducing new modules, changing an API, planning a feature, or making non-obvious trade-offs. Deliverable: a written plan listing exact files to change, the change in each, dependencies, risks, and acceptance criteria. Implementer reads this plan; Orchestrator must not write the full plan itself.',
   },
   implementer: {
     id: 'implementer',
     label: 'Implementer',
     description:
-      'Writes and edits code. Must receive the Architect plan (when one was produced) as part of its prompt. Owns ALL file edits — the Orchestrator never edits files directly. Deliverable: the actual diff plus a one-paragraph summary of what changed and why.',
+      'Writes and edits code according to the accepted plan. Must receive the Architect plan (when one was produced) as part of its prompt. Owns ALL file edits, but does not own broad design, review, verification, docs, dependency, or DevOps work. Deliverable: the actual diff plus a one-paragraph summary of what changed and why.',
   },
   reviewer: {
     id: 'reviewer',
@@ -97,6 +97,15 @@ export type TeamModeRole = {
   model: string
   effort?: string | number
   active: boolean
+}
+
+// Team-mode activation is intentionally process-local. The roster is persisted,
+// but a fresh CLI session must always start with team mode off until the user
+// explicitly runs `/team-mode on`.
+let sessionTeamModeEnabled = false
+
+export function setTeamModeEnabledForSession(enabled: boolean): void {
+  sessionTeamModeEnabled = enabled
 }
 
 function isTeamModeRoleId(value: string): value is TeamModeRoleId {
@@ -156,7 +165,7 @@ export function hasConfiguredTeamModeRoster(): boolean {
 }
 
 export function isTeamModeEnabled(): boolean {
-  return getGlobalConfig().teamModeEnabled === true
+  return sessionTeamModeEnabled
 }
 
 // Active = configured AND not skipped. The orchestrator only spawns these.

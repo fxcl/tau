@@ -16,6 +16,7 @@ import {
 } from '../../utils/model/providerCatalog.js'
 import {
   formatTeamModeRole,
+  setTeamModeEnabledForSession,
   TEAM_MODE_ROLE_IDS,
   TEAM_MODE_ROLE_META,
   type TeamModeRole,
@@ -34,7 +35,7 @@ const TOTAL_STEPS = TEAM_MODE_ROLE_IDS.length
 
 function commitRoster(
   roster: TeamModeRole[],
-  enableOnFinish: boolean | undefined,
+  _enableOnFinish: boolean | undefined,
 ) {
   saveGlobalConfig(current => ({
     ...current,
@@ -45,7 +46,7 @@ function commitRoster(
       effort: r.effort,
       active: r.active,
     })),
-    teamModeEnabled: enableOnFinish === true ? true : current.teamModeEnabled,
+    teamModeEnabled: false,
   }))
   // Drop the section cache so the next turn's system prompt picks up the new
   // roster — otherwise the orchestrator keeps showing the old binding until
@@ -88,10 +89,12 @@ export function TeamModeWizard({
   onDone,
   initialProvider,
   enableOnFinish,
+  onTeamModeEnabled,
 }: {
   onDone: OnDone
   initialProvider: APIProvider
   enableOnFinish?: boolean
+  onTeamModeEnabled?: (roster: TeamModeRole[]) => void
 }) {
   const [stepIndex, setStepIndex] = useState(0)
   const [mode, setMode] = useState<StepMode>('menu')
@@ -103,6 +106,10 @@ export function TeamModeWizard({
 
   function finalize(finalRoster: TeamModeRole[]) {
     commitRoster(finalRoster, enableOnFinish)
+    if (enableOnFinish) {
+      setTeamModeEnabledForSession(true)
+      onTeamModeEnabled?.(finalRoster)
+    }
     onDone(summaryLines(finalRoster, enableOnFinish).join('\n'), {
       display: 'system',
     })

@@ -1,18 +1,21 @@
 import chalk from 'chalk'
 import * as React from 'react'
 import type { CommandResultDisplay } from '../../commands.js'
-import type { LocalJSXCommandCall } from '../../types/command.js'
+import type { LocalJSXCommandCall, LocalJSXCommandContext } from '../../types/command.js'
 import { ProviderModelPicker } from '../../components/ProviderModelPicker.js'
 import { clearSystemPromptSections } from '../../constants/systemPromptSections.js'
 import { validateProviderAuth } from '../../utils/auth.js'
 import { saveGlobalConfig } from '../../utils/config.js'
-import { isAPIProvider, getAPIProvider, setActiveProvider, PROVIDER_DISPLAY_NAMES } from '../../utils/model/providers.js'
+import { stripSignatureBlocks } from '../../utils/messages.js'
+import { isAPIProvider, getAPIProvider, setActiveProvider } from '../../utils/model/providers.js'
+import type { APIProvider } from '../../utils/model/providers.js'
 import { setMainLoopModelOverride } from '../../bootstrap/state.js'
 import {
   isVoiceConversationProvider,
   resolveProviderModelSelection,
   type BrowsableModelProvider,
 } from '../../utils/model/providerCatalog.js'
+import { applyTeamModeOrchestratorAppState } from '../../utils/teamMode/appState.js'
 import {
   formatTeamModeFallback,
   formatTeamModeRole,
@@ -23,7 +26,9 @@ import {
   hasConfiguredTeamModeRoster,
   isTeamModeEnabled,
   isTeamModeFallbackEnabled,
+  setTeamModeEnabledForSession,
   TEAM_MODE_ROLE_META,
+  type TeamModeRole,
 } from '../../utils/teamMode/state.js'
 import { TeamModeWizard } from './TeamModeWizard.js'
 
@@ -115,6 +120,7 @@ function showStatus(onDone: OnDone) {
 }
 
 function resetTeamMode(onDone: OnDone) {
+  setTeamModeEnabledForSession(false)
   saveGlobalConfig(current => ({
     ...current,
     teamModeEnabled: undefined,
@@ -130,6 +136,7 @@ function resetTeamMode(onDone: OnDone) {
 }
 
 function turnTeamModeOff(onDone: OnDone) {
+  setTeamModeEnabledForSession(false)
   saveGlobalConfig(current => ({
     ...current,
     teamModeEnabled: false,
@@ -305,10 +312,41 @@ function FallbackPicker({ onDone }: { onDone: OnDone }) {
   )
 }
 
-function turnTeamModeOn(onDone: OnDone) {
+function applyOrchestratorRuntimeSelection(
+  context: LocalJSXCommandContext,
+  orchestrator: TeamModeRole,
+  providerBeforeEnable: APIProvider,
+) {
+  const previousModel = context.getAppState().mainLoopModel
+
+  setActiveProvider(orchestrator.provider)
+  setMainLoopModelOverride(orchestrator.model)
+  context.options.mainLoopModel = orchestrator.model
+  context.setAppState(prev =>
+    applyTeamModeOrchestratorAppState(prev, orchestrator),
+  )
+
+  if (
+    orchestrator.provider === 'firstParty'
+    && (providerBeforeEnable !== 'firstParty'
+      || previousModel !== orchestrator.model)
+  ) {
+    context.setMessages(stripSignatureBlocks)
+  }
+}
+
+function renderTeamModeOnMessage(orchestrator: TeamModeRole | undefined): string {
+  const head = `${chalk.blueBright.bold('Team mode on.')} ${chalk.white('Prompts will be routed through the configured team.')}`
+  if (!orchestrator) return head
+  return `${head}\n${chalk.blueBright('Orchestrator:')} ${chalk.white(formatTeamModeRole(orchestrator))}`
+}
+
+function turnTeamModeOn(onDone: OnDone, context: LocalJSXCommandContext) {
+  const providerBeforeEnable = getAPIProvider()
+  setTeamModeEnabledForSession(true)
   saveGlobalConfig(current => ({
     ...current,
-    teamModeEnabled: true,
+    teamModeEnabled: false,
   }))
   // Cache flush so the next turn picks up the orchestrator addendum. Toggling
   // mid-session costs one prompt-cache miss; toggling off-on stays warm.
@@ -322,21 +360,18 @@ function turnTeamModeOn(onDone: OnDone) {
   // apply also persists the choice so the next session boots into the
   // orchestrator's binding without depending on the lazy resolution path.
   const orchestrator = getActiveTeamModeRoles().find(r => r.role === 'orchestrator')
-  let appliedLine = ''
   if (orchestrator) {
-    setActiveProvider(orchestrator.provider)
-    setMainLoopModelOverride(orchestrator.model)
-    const provider = PROVIDER_DISPLAY_NAMES[orchestrator.provider]
-    appliedLine = `\nOrchestrator: ${chalk.cyan(`${provider} / ${orchestrator.model}`)}`
+    applyOrchestratorRuntimeSelection(
+      context,
+      orchestrator,
+      providerBeforeEnable,
+    )
   }
 
-  onDone(
-    `${chalk.bold('Team mode on.')} Prompts will be routed through the configured team.${appliedLine}`,
-    { display: 'system' },
-  )
+  onDone(renderTeamModeOnMessage(orchestrator), { display: 'system' })
 }
 
-export const call: LocalJSXCommandCall = async (onDone, _context, args) => {
+export const call: LocalJSXCommandCall = async (onDone, context, args) => {
   const subcommand = (args?.trim() || '').toLowerCase()
 
   // Two-word subcommands: "/team-mode fallback ..." routes to a separate
@@ -406,15 +441,28 @@ export const call: LocalJSXCommandCall = async (onDone, _context, args) => {
 
     case 'on': {
       if (!hasConfiguredTeamModeRoster()) {
+        const providerBeforeEnable = getAPIProvider()
         return (
           <TeamModeWizard
             onDone={onDone}
             initialProvider={getAPIProvider()}
             enableOnFinish
+            onTeamModeEnabled={roster => {
+              const orchestrator = roster.find(
+                r => r.role === 'orchestrator' && r.active,
+              )
+              if (orchestrator) {
+                applyOrchestratorRuntimeSelection(
+                  context,
+                  orchestrator,
+                  providerBeforeEnable,
+                )
+              }
+            }}
           />
         )
       }
-      turnTeamModeOn(onDone)
+      turnTeamModeOn(onDone, context)
       return
     }
 
