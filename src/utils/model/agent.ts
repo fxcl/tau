@@ -8,6 +8,7 @@ import {
   parseUserSpecifiedModel,
 } from './model.js'
 import { getAPIProvider } from './providers.js'
+import { getForcedProvider } from '../forcedProvider.js'
 
 export const AGENT_MODEL_OPTIONS = [...MODEL_ALIASES, 'inherit'] as const
 export type AgentModelAlias = (typeof AGENT_MODEL_OPTIONS)[number]
@@ -40,10 +41,6 @@ export function getAgentModel(
   toolSpecifiedModel?: ModelAlias,
   permissionMode?: PermissionMode,
 ): string {
-  if (process.env.CLAUDE_CODE_SUBAGENT_MODEL) {
-    return parseUserSpecifiedModel(process.env.CLAUDE_CODE_SUBAGENT_MODEL)
-  }
-
   // Extract Bedrock region prefix from parent model to inherit for subagents.
   // This ensures subagents use the same cross-region inference profile (e.g., "eu.", "us.")
   // as the parent, which is required when IAM permissions only allow specific regions.
@@ -66,13 +63,27 @@ export function getAgentModel(
     return resolvedModel
   }
 
-  // Prioritize tool-specified model if provided
+  // Explicit caller intent always wins. If the AgentTool caller passed a
+  // model (team-mode roster pin, programmatic SDK caller, --model on a
+  // teammate spawn), honor it — do NOT let CLAUDE_CODE_SUBAGENT_MODEL or
+  // any other session-wide override silently swap it. This is the same
+  // contract enforced for forced providers in v0.9.3-v0.9.4: when the
+  // caller declares the exact model, runtime sugar yields.
   if (toolSpecifiedModel) {
     if (aliasMatchesParentTier(toolSpecifiedModel, parentModel)) {
       return parentModel
     }
     const model = parseUserSpecifiedModel(toolSpecifiedModel)
     return applyParentRegionPrefix(model, toolSpecifiedModel)
+  }
+
+  // CLAUDE_CODE_SUBAGENT_MODEL is a session-wide override for "all subagents
+  // use this model". It must NOT fire when a team-mode role pinned the
+  // provider for this spawn — the env var would silently replace the role's
+  // model with whatever default this var holds, exactly the cross-binding
+  // contamination we shipped v0.9.3-v0.9.4 to prevent.
+  if (process.env.CLAUDE_CODE_SUBAGENT_MODEL && getForcedProvider() === undefined) {
+    return parseUserSpecifiedModel(process.env.CLAUDE_CODE_SUBAGENT_MODEL)
   }
 
   const agentModelWithExp = agentModel ?? getDefaultSubagentModel()

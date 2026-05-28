@@ -71,6 +71,11 @@ export function getTeamModeOrchestratorAddendum(): string | null {
   // translation. The orchestrator picks the role's block, copies it, fills
   // in description + prompt, and sends. No way to swap roster rows by
   // accident because the values are baked into the example.
+  //
+  // We also include `name: "<role-id>"` so the runtime's tier-1 validation
+  // can pin the spawn to that specific role's binding — catching the case
+  // where two roles share a provider but differ in model_id and the LLM
+  // grabs the wrong row's model.
   const spawnExamples = roles.map(role => {
     const meta = TEAM_MODE_ROLE_META[role.role]
     return [
@@ -78,6 +83,7 @@ export function getTeamModeOrchestratorAddendum(): string | null {
       '```',
       'Agent({',
       '  subagent_type: "general-purpose",',
+      `  name: "${role.role}",`,
       '  description: "<3-5 word phase title>",',
       '  prompt: "<task for this worker>",',
       `  provider: "${role.provider}",`,
@@ -106,7 +112,13 @@ export function getTeamModeOrchestratorAddendum(): string | null {
   return [
     '# Team Mode (Auto-Orchestration)',
     '',
-    'You are operating with /team-mode ON. The user has bound a fixed roster of specialized roles to specific provider+model pairs. **The `provider` and `model_id` values you pass to the Agent tool MUST be copied EXACTLY from the role you intend to spawn.** Do not transliterate display names. Do not mix one role\'s provider with another role\'s model — the runtime rejects mismatched pairs with `team-mode role binding mismatch`.',
+    'You are operating with /team-mode ON. The user has bound a fixed roster of specialized roles to specific provider+model pairs.',
+    '',
+    '**Hard rules — the runtime ENFORCES these and rejects any spawn that violates them:**',
+    '',
+    '1. Every Agent call MUST include `name` set to the role id you are spawning (e.g. `"implementer"`, `"architect"`). This is how you declare intent.',
+    '2. The `provider` and `model_id` you pass MUST match the role named in `name` EXACTLY. The runtime cross-checks: if `name: "implementer"` is paired with the Architect\'s `provider`/`model_id`, the spawn is rejected with `team-mode role binding mismatch`.',
+    '3. Use the per-role spawn templates below — they have `name`, `provider`, and `model_id` already filled in correctly. Copy the WHOLE block for the role you want, then fill in `description` and `prompt`. Never hand-edit the three pinned fields.',
     '',
     '## Configured role bindings',
     '',

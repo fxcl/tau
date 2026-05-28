@@ -270,44 +270,84 @@ export const AgentTool = buildTool({
     const modelIdParam = teamModeOn ? rawModelIdParam : undefined;
 
     // Team-mode role-binding validation. When team mode is ON and the caller
-    // passes BOTH a provider and a model_id, the pair must match either an
-    // active role binding from the roster OR the shared fallback worker.
-    // Without this, an LLM that mis-maps the roster (e.g. spawns the
-    // Implementer role with the Architect's model_id, because the roster
-    // table was ambiguous to parse) silently produces a request on the wrong
-    // worker — the upstream provider answers with the wrong model and the
-    // user sees the wrong work get done.
+    // passes BOTH a provider and a model_id, the spawn MUST declare its role
+    // via `name`, and the (provider, model_id) pair MUST exactly match that
+    // role's binding from the roster (or the shared fallback worker).
     //
-    // We only validate the FULL pair. If the LLM passes provider alone (rare
-    // — the orchestrator prompt always asks for both) we let it through so
-    // the parent's mainLoopModel still applies; that path is the legacy
-    // pre-roster behavior and isn't expected in team mode but isn't harmful.
-    if (teamModeOn && providerParam !== undefined && modelIdParam !== undefined) {
+    // The hard `name` requirement is what closes the wrong-row hole: without
+    // it, an LLM that copies the Architect template by mistake when meaning
+    // to spawn the Implementer would pass a self-consistent (Architect's
+    // provider, Architect's model) pair and the worker would run as
+    // Architect with no signal that the orchestrator's intent was wrong.
+    // Requiring `name` forces the orchestrator to write the role id every
+    // time, and the runtime cross-checks the pair against that exact role.
+    //
+    // We only enforce this when the spawn passes provider/model_id at all.
+    // Bare Agent({prompt, description}) calls (rare in team-mode, but legal)
+    // fall through and inherit the parent's model.
+    if (teamModeOn && (providerParam !== undefined || modelIdParam !== undefined)) {
+      const activeRoles = getActiveTeamModeRoles()
+      const fallback = isTeamModeFallbackEnabled() ? getTeamModeFallbackWorker() : null
+      const rosterLines = activeRoles.map(
+        r => `  - ${r.role}: provider="${r.provider}", model_id="${r.model}"`,
+      )
+      const fallbackLine = fallback
+        ? `\n  - <fallback>: provider="${fallback.provider}", model_id="${fallback.model}"`
+        : ''
+      const rosterHint = `Configured bindings:\n${rosterLines.join('\n')}${fallbackLine}`
+
+      // Both fields required together. One without the other means the
+      // orchestrator dropped half the binding.
+      if (providerParam === undefined || modelIdParam === undefined) {
+        throw new Error(
+          `team-mode spawn requires both \`provider\` and \`model_id\` together (received provider=${JSON.stringify(providerParam ?? null)}, model_id=${JSON.stringify(modelIdParam ?? null)}).\n` +
+          `${rosterHint}\n` +
+          `Copy the full spawn template for the role you want to run — do not pass provider without model_id or vice versa.`,
+        )
+      }
+
       const requestedProvider = providerParam.trim()
       const requestedModel = modelIdParam.trim()
-      const activeRoles = getActiveTeamModeRoles()
-      const matchedRole = activeRoles.find(
-        r => r.provider === requestedProvider && r.model === requestedModel,
-      )
-      const fallback = isTeamModeFallbackEnabled() ? getTeamModeFallbackWorker() : null
+
+      // The shared fallback is the one exception to the role-id requirement
+      // — it's a catch-all, not a named role. If the pair exactly matches
+      // the fallback worker, allow the spawn even when name isn't set.
       const matchesFallback =
         fallback !== null &&
         fallback.provider === requestedProvider &&
         fallback.model === requestedModel
-      if (!matchedRole && !matchesFallback) {
-        const rosterLines = activeRoles.map(
-          r => `  - ${r.role}: provider="${r.provider}", model_id="${r.model}"`,
-        )
-        const fallbackLine = fallback
-          ? `\n  - <fallback>: provider="${fallback.provider}", model_id="${fallback.model}"`
-          : ''
-        throw new Error(
-          `team-mode role binding mismatch: ` +
-          `provider="${requestedProvider}" + model_id="${requestedModel}" does not match any configured role.\n` +
-          `Configured bindings:\n${rosterLines.join('\n')}${fallbackLine}\n` +
-          `Copy the provider and model_id pair verbatim from the role you want to spawn — ` +
-          `do not mix one role's provider with another role's model.`,
-        )
+
+      if (!matchesFallback) {
+        // `name` is required for non-fallback spawns. Reject when missing
+        // OR when it doesn't match any configured role id.
+        const trimmedName = name?.trim()
+        const declaredRole = trimmedName
+          ? activeRoles.find(r => r.role === trimmedName)
+          : undefined
+
+        if (!declaredRole) {
+          const knownNames = activeRoles.map(r => `"${r.role}"`).join(', ')
+          throw new Error(
+            `team-mode spawn requires \`name\` to be one of the configured role ids (${knownNames || '<none configured>'}). ` +
+            `Received name=${JSON.stringify(name ?? null)}.\n` +
+            `${rosterHint}\n` +
+            `Use the per-role spawn template from your team-mode system prompt — it sets \`name\` to the role id automatically.`,
+          )
+        }
+
+        if (
+          declaredRole.provider !== requestedProvider ||
+          declaredRole.model !== requestedModel
+        ) {
+          throw new Error(
+            `team-mode role binding mismatch: spawning role "${declaredRole.role}" ` +
+            `requires provider="${declaredRole.provider}" + model_id="${declaredRole.model}", ` +
+            `but received provider="${requestedProvider}" + model_id="${requestedModel}".\n` +
+            `${rosterHint}\n` +
+            `You copied a different role's provider/model values into the "${declaredRole.role}" spawn. ` +
+            `Re-issue the call using the "${declaredRole.role}" template verbatim.`,
+          )
+        }
       }
     }
 
