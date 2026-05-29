@@ -1,40 +1,24 @@
 import * as React from 'react'
-import { useEffect, useRef, useState } from 'react'
+import { useState } from 'react'
 import { TEARDROP_ASTERISK } from '../../constants/figures.js'
 import { Box, Text, useAnimationFrame } from '../../ink.js'
 import { getInitialSettings } from '../../utils/settings/settings.js'
-import { toRGBColor } from '../Spinner/utils.js'
+import { hueToRgb, toRGBColor } from '../Spinner/utils.js'
 
-const SWEEP_DURATION_MS = 1500
-const SWEEP_COUNT = 2
-const TOTAL_ANIMATION_MS = SWEEP_DURATION_MS * SWEEP_COUNT
+// Tau brand hue range: violet (270) → cyan (180) → green (120), cycling
+const TAU_HUE_START = 270  // violet
+const TAU_HUE_RANGE = 150  // sweeps 270→120 then back
+const CYCLE_MS = 3000      // full cycle period
 
-// Settled color: soft green matching Tau theme
-const SETTLED_COLOR = toRGBColor({ r: 140, g: 200, b: 140 })
+// Settled color: electric cyan-mint (Tau brand)
+const SETTLED_COLOR = toRGBColor({ r: 120, g: 255, b: 220 })
 
-/**
- * Tau gradient: purple -> blue -> green
- * Maps a 0-1 progress value to an RGB color along the gradient.
- */
-function claudexGradient(t: number): { r: number; g: number; b: number } {
-  // 3-stop gradient: purple (0) -> blue (0.5) -> green (1.0)
-  if (t < 0.5) {
-    // Purple to Blue
-    const p = t * 2 // 0..1 within this segment
-    return {
-      r: Math.round(180 * (1 - p) + 130 * p),   // 180 -> 130
-      g: Math.round(120 * (1 - p) + 165 * p),   // 120 -> 165
-      b: Math.round(220 * (1 - p) + 210 * p),   // 220 -> 210
-    }
-  } else {
-    // Blue to Green
-    const p = (t - 0.5) * 2 // 0..1 within this segment
-    return {
-      r: Math.round(130 * (1 - p) + 140 * p),   // 130 -> 140
-      g: Math.round(165 * (1 - p) + 210 * p),   // 165 -> 210
-      b: Math.round(210 * (1 - p) + 140 * p),   // 210 -> 140
-    }
-  }
+function tauPulse(time: number): { r: number; g: number; b: number } {
+  const t = (time % CYCLE_MS) / CYCLE_MS
+  // Sine wave: smooth 0→1→0 oscillation over the hue range
+  const wave = (Math.sin(t * Math.PI * 2 - Math.PI / 2) + 1) / 2
+  const hue = (TAU_HUE_START - wave * TAU_HUE_RANGE + 360) % 360
+  return hueToRgb(hue)
 }
 
 export function AnimatedAsterisk({
@@ -45,17 +29,9 @@ export function AnimatedAsterisk({
   const [reducedMotion] = useState(
     () => getInitialSettings().prefersReducedMotion ?? false,
   )
-  const [done, setDone] = useState(reducedMotion)
-  const startTimeRef = useRef<number | null>(null)
-  const [ref, time] = useAnimationFrame(done ? null : 50)
+  const [ref, time] = useAnimationFrame(reducedMotion ? null : 50)
 
-  useEffect(() => {
-    if (done) return
-    const t = setTimeout(setDone, TOTAL_ANIMATION_MS, true)
-    return () => clearTimeout(t)
-  }, [done])
-
-  if (done) {
+  if (reducedMotion) {
     return (
       <Box ref={ref}>
         <Text color={SETTLED_COLOR}>{char}</Text>
@@ -63,13 +39,7 @@ export function AnimatedAsterisk({
     )
   }
 
-  if (startTimeRef.current === null) {
-    startTimeRef.current = time
-  }
-  const elapsed = time - startTimeRef.current
-  // Cycle through the gradient: 0->1 per sweep
-  const progress = (elapsed / SWEEP_DURATION_MS) % 1
-  const rgb = claudexGradient(progress)
+  const rgb = tauPulse(time)
 
   return (
     <Box ref={ref}>

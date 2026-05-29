@@ -2,7 +2,7 @@ import { c as _c } from "react/compiler-runtime";
 import * as React from 'react';
 import { Box, Text, useTheme } from '../../ink.js';
 import { getTheme, type Theme } from '../../utils/theme.js';
-import { getDefaultCharacters, interpolateColor, parseRGB, toRGBColor } from './utils.js';
+import { getDefaultCharacters, hueToRgb, interpolateColor, parseRGB, toRGBColor } from './utils.js';
 const DEFAULT_CHARACTERS = getDefaultCharacters();
 const SPINNER_FRAMES = [...DEFAULT_CHARACTERS, ...[...DEFAULT_CHARACTERS].reverse()];
 const REDUCED_MOTION_DOT = '●';
@@ -66,10 +66,11 @@ export function SpinnerGlyph(t0) {
     }
     return t4;
   }
+  const spinnerColor = toRGBColor(hueToRgb((time / 50) % 360));
   let t4;
-  if ($[6] !== messageColor || $[7] !== spinnerChar) {
-    t4 = <Box flexWrap="wrap" height={1} width={2}><Text color={messageColor}>{spinnerChar}</Text></Box>;
-    $[6] = messageColor;
+  if ($[6] !== spinnerColor || $[7] !== spinnerChar) {
+    t4 = <Box flexWrap="wrap" height={1} width={2}><Text color={spinnerColor}>{spinnerChar}</Text></Box>;
+    $[6] = spinnerColor;
     $[7] = spinnerChar;
     $[8] = t4;
   } else {
