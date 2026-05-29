@@ -2151,6 +2151,17 @@ async function run(): Promise<CommanderCommand> {
     if (!effectiveModel && mainThreadAgentDefinition?.model && mainThreadAgentDefinition.model !== 'inherit') {
       effectiveModel = parseUserSpecifiedModel(mainThreadAgentDefinition.model);
     }
+    // Pin this session to its launch-time model so it stays independent of
+    // other concurrent sessions. Without --model (and no agent model) the
+    // override is left unset, which makes the session live-read the shared
+    // user settings file — so a /model switch in another session (which
+    // persists to that file) gets applied here by the settings watcher.
+    // Capturing the resolved setting (flag → env → settings) freezes each
+    // session to its own model. /model within THIS session still updates the
+    // override via onChangeAppState, and restart persistence is unchanged.
+    if (!effectiveModel) {
+      effectiveModel = getUserSpecifiedModelSetting();
+    }
     setMainLoopModelOverride(effectiveModel);
 
     // Compute resolved model for hooks (use user-specified model at launch)
