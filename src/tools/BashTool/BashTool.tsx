@@ -42,12 +42,11 @@ import { userFacingName as fileEditUserFacingName } from '../FileEditTool/UI.js'
 import { trackGitOperations } from '../shared/gitOperationTracking.js';
 import { bashToolHasPermission, commandHasAnyCd, matchWildcardPattern, permissionRuleExtractPrefix } from './bashPermissions.js';
 import { validateBashCommandPartsMatch } from './bashCommandParts.js';
-import { renderBashAutoPlanMessage, renderBashCommandPlan } from './bashCommandPlanner.js';
+import { renderBashCommandPlan } from './bashCommandPlanner.js';
 import { appendBashFailureGuidance } from './bashFailureGuidance.js';
 import { validateBashExecutionPreflight } from './bashPreflightValidation.js';
 import { maybeAppendCommandHelp } from './commandHelp.js';
 import { checkBashRetryGuard, recordBashFailure, recordBashSuccess } from './bashRetryGuard.js';
-import { validateBashSyntax } from './bashSyntaxValidation.js';
 import { getPlatform } from '../../utils/platform.js';
 import { findGitBashPath } from '../../utils/windowsPaths.js';
 import { interpretCommandResult } from './commandSemantics.js';
@@ -277,8 +276,8 @@ For commands that are harder to parse at a glance (piped commands, obscure flags
 - git reset --hard origin/main → "Discard all local changes and match remote main"
 - curl -s url | jq '.data[]' → "Fetch JSON from URL and extract data array elements"`),
   run_in_background: semanticBoolean(z.boolean().optional()).describe(`Set to true to run this command in the background. Use Read to read the output later.`),
-  plan_only: semanticBoolean(z.boolean().optional()).describe('Set to true to analyze a complex or unfamiliar Bash command without executing it. Use this before running CLI syntax you are not certain about.'),
-  syntax_confirmed: semanticBoolean(z.boolean().optional()).describe('Set to true only after checking a plan_only report, running a discovery command such as --help, or compiling the command from command_parts. This only bypasses proactive syntax planning; it does not bypass validation, permissions, sandboxing, or retry guard.'),
+  plan_only: semanticBoolean(z.boolean().optional()).describe('Set to true only when the user explicitly asks for a dry-run command plan. Normal commands execute directly.'),
+  syntax_confirmed: semanticBoolean(z.boolean().optional()).describe('Deprecated compatibility flag. It has no effect; normal commands execute directly after safety and permission checks.'),
   command_parts: bashCommandPartsSchema.optional().describe('Optional structured Bash command form. Tau compiles these parts into a safely quoted Bash command and blocks execution if command does not match the compiled result. Use this for complex external CLI syntax instead of hand-quoting raw Bash.'),
   dangerouslyDisableSandbox: semanticBoolean(z.boolean().optional()).describe('Set this to true to dangerously override sandbox mode and run commands without sandboxing.'),
   workdir: z.string().optional().describe('Optional working directory to run this command in. Absolute, or relative to the current session cwd. Use this INSTEAD of `cd path && command` — it avoids path-quoting issues (especially on Windows where backslashes are escapes) and never changes the session cwd. Only affects this single invocation.'),
@@ -632,22 +631,6 @@ export const BashTool = buildTool({
         result: false,
         message: preflightValidation.message,
         errorCode: 13
-      };
-    }
-    const syntaxValidation = await validateBashSyntax(input.command);
-    if (!syntaxValidation.ok) {
-      return {
-        result: false,
-        message: syntaxValidation.message,
-        errorCode: 11
-      };
-    }
-    const autoPlanMessage = await renderBashAutoPlanMessage(input);
-    if (autoPlanMessage !== null) {
-      return {
-        result: false,
-        message: autoPlanMessage,
-        errorCode: 15
       };
     }
     return {

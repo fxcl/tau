@@ -83,19 +83,16 @@ async function main(): Promise<void> {
     assert(plan.discoveryCommands.length === 0, 'expected no discovery suggestions')
   })
 
-  await test('requires proactive plan for complex external CLI syntax', () => {
+  await test('does not require proactive plan for complex external CLI syntax', () => {
     const decision = shouldAutoPlanBashCommand({
       command: 'docker compose -f docker-compose.yml --profile gpu up --build -d api worker',
     })
 
-    assert(decision.required, 'expected auto-plan requirement')
-    assert(
-      decision.reasons.some(reason => reason.includes('container')),
-      'expected container reason',
-    )
+    assert(!decision.required, 'complex commands should execute without forced dry-run')
+    assert(decision.reasons.length === 0, 'forced dry-run reasons should stay empty')
   })
 
-  await test('does not auto-plan discovery, read-like, confirmed, or structured commands', () => {
+  await test('does not auto-plan discovery, read-like, compatibility, or structured commands', () => {
     assert(
       !shouldAutoPlanBashCommand({ command: 'docker compose --help' }).required,
       'discovery should not require auto-plan',

@@ -110,36 +110,6 @@ const SHELL_BUILTINS = new Set([
   'alias',
 ])
 
-const READ_LIKE_BASES = new Set([
-  'ls',
-  'dir',
-  'cat',
-  'head',
-  'tail',
-  'sed',
-  'awk',
-  'jq',
-  'grep',
-  'rg',
-  'find',
-  'tree',
-  'wc',
-  'stat',
-  'file',
-  'pwd',
-])
-
-const AUTO_PLAN_DOMAINS = new Set<BashCommandDomain>([
-  'container',
-  'kubernetes',
-  'package-manager',
-  'python',
-  'test-runner',
-  'build-runner',
-  'cloud',
-  'service',
-])
-
 function unique(values: string[]): string[] {
   return [...new Set(values.filter(Boolean))]
 }
@@ -289,10 +259,6 @@ function recommendedDiscoveryCommands(
   return unique(suggestions).slice(0, 6)
 }
 
-function complexityScore(complexity: string[]): number {
-  return complexity.filter(item => item !== 'simple command shape').length
-}
-
 export function analyzeBashCommandPlanning(
   input: BashCommandPlannerInput,
 ): BashCommandPlanningInfo {
@@ -321,44 +287,10 @@ export function shouldAutoPlanBashCommand(
   input: BashCommandPlannerInput,
 ): BashAutoPlanDecision {
   const info = analyzeBashCommandPlanning(input)
-  const score = complexityScore(info.complexity)
-  const reasons: string[] = []
-
-  if (
-    input.plan_only ||
-    input.syntax_confirmed ||
-    input.command_parts ||
-    info.isDiscoveryCommand ||
-    !info.base ||
-    READ_LIKE_BASES.has(info.base) ||
-    info.domain === 'shell'
-  ) {
-    return {
-      required: false,
-      reasons,
-      info,
-    }
-  }
-
-  if (AUTO_PLAN_DOMAINS.has(info.domain) && score >= 2) {
-    reasons.push(`complex ${info.domain} command`)
-  }
-
-  if (info.domain === 'git' && score >= 3) {
-    reasons.push('complex git command')
-  }
-
-  if (info.domain === 'external-cli' && score >= 3) {
-    reasons.push('complex external CLI command')
-  }
-
-  if (input.command.length > 220 && info.domain !== 'shell') {
-    reasons.push('very long external command')
-  }
 
   return {
-    required: reasons.length > 0,
-    reasons,
+    required: false,
+    reasons: [],
     info,
   }
 }
@@ -367,20 +299,9 @@ export async function renderBashAutoPlanMessage(
   input: BashCommandPlannerInput,
   cwd = getCwd(),
 ): Promise<string | null> {
-  const decision = shouldAutoPlanBashCommand(input)
-  if (!decision.required) return null
-
-  const plan = await renderBashCommandPlan(input, cwd)
-  return [
-    'Blocked: this Bash command is complex enough that Tau should verify the formulation before executing it.',
-    '',
-    `Reason: ${decision.reasons.join(', ')}`,
-    '',
-    plan,
-    '',
-    'To execute after checking the plan or running a discovery command, rerun with syntax_confirmed: true.',
-    'If you can express the command as structured command_parts, use that instead of manually quoting raw Bash.',
-  ].join('\n')
+  void input
+  void cwd
+  return null
 }
 
 function formatValidationStatus(ok: boolean, message?: string): string[] {
@@ -525,8 +446,7 @@ export async function renderBashCommandPlan(
     '',
     'Next step:',
     '- If the plan matches the task, rerun the adjusted command with plan_only omitted or false.',
-    '- For commands blocked by proactive planning, set syntax_confirmed to true after checking the plan.',
-    '- Actual execution will still pass through Bash syntax validation, permissions, sandboxing, and retry guard.',
+    '- Actual execution will still pass through permissions, sandboxing, path preflight, and retry guard.',
     '- If the CLI syntax is still uncertain, run one of the discovery commands first instead of guessing variants.',
   )
 
