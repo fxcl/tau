@@ -92,14 +92,19 @@ export function runNativeTauToolSync(
   const binary = getNativeTauToolsPath()
   if (!binary) return null
 
-  const result = spawnSync(binary, [command, ...args], {
-    cwd: getCwd(),
-    encoding: 'utf8',
-    input: options.input,
-    timeout: options.timeoutMs ?? 5_000,
-    maxBuffer: options.maxBuffer ?? 1_000_000,
-    windowsHide: true,
-  })
+  let result
+  try {
+    result = spawnSync(binary, [command, ...args], {
+      cwd: getCwd(),
+      encoding: 'utf8',
+      input: options.input,
+      timeout: options.timeoutMs ?? 5_000,
+      maxBuffer: options.maxBuffer ?? 1_000_000,
+      windowsHide: true,
+    })
+  } catch {
+    return null
+  }
 
   if (result.status !== 0 || result.error) {
     return null
