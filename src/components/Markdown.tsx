@@ -6,7 +6,6 @@ import { Ansi, Box, useTheme } from '../ink.js';
 import { type CliHighlight, getCliHighlightPromise } from '../utils/cliHighlight.js';
 import { hashContent } from '../utils/hash.js';
 import { configureMarked, formatToken } from '../utils/markdown.js';
-import { renderMarkdownWithNative } from '../utils/nativeRendering.js';
 import { stripPromptXMLTags } from '../utils/messages.js';
 import { MarkdownTable } from './MarkdownTable.js';
 type Props = {
@@ -134,10 +133,7 @@ function MarkdownBody(t0) {
   let elements;
   if ($[0] !== children || $[1] !== dimColor || $[2] !== highlight || $[3] !== theme) {
     const strippedContent = stripPromptXMLTags(children);
-    const nativeRendered = dimColor ? null : renderMarkdownWithNative(strippedContent, theme);
-    if (nativeRendered) {
-      elements = [<Ansi key={0}>{nativeRendered}</Ansi>];
-    } else if (ANSI_RE.test(strippedContent)) {
+    if (ANSI_RE.test(strippedContent)) {
       elements = [<Ansi key={0} dimColor={dimColor}>{strippedContent.trim()}</Ansi>];
     } else {
     const tokens = cachedLexer(strippedContent);

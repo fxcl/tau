@@ -1,5 +1,6 @@
 import { c as _c } from "react/compiler-runtime";
 import React from 'react';
+import stripAnsi from 'strip-ansi';
 import Link from './components/Link.js';
 import Text from './components/Text.js';
 import type { Color } from './styles.js';
@@ -55,7 +56,14 @@ export const Ansi = React.memo(function Ansi(t0) {
   if ($[3] !== children || $[4] !== dimColor) {
     t2 = Symbol.for("react.early_return_sentinel");
     bb0: {
-      const spans = parseToSpans(children);
+      let spans;
+      try {
+        spans = parseToSpans(children);
+      } catch {
+        const fallbackText = stripAnsi(children);
+        t2 = dimColor ? <Text dim={true}>{fallbackText}</Text> : <Text>{fallbackText}</Text>;
+        break bb0;
+      }
       if (spans.length === 0) {
         t2 = null;
         break bb0;
