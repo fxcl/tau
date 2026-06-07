@@ -225,6 +225,23 @@ function main(): void {
     assert(content.includes('<tool_usage_rules>'), 'expected Kiro tool usage rules in system prompt')
   })
 
+  test('omits Kiro profileArn unless auth supplied a real one', () => {
+    const base = {
+      model: 'deepseek-3.2',
+      system: '',
+      messages: [{ role: 'user' as const, content: 'hi' }],
+      tools: [],
+    }
+    const withoutProfile = buildKiroPayload(base)
+    assert(!('profileArn' in withoutProfile), 'Builder ID payload should omit profileArn')
+
+    const withProfile = buildKiroPayload({
+      ...base,
+      profileArn: 'arn:aws:codewhisperer:us-east-1:123456789012:profile/EXAMPLE',
+    })
+    assert(withProfile.profileArn?.endsWith('/EXAMPLE'), 'expected stored profileArn to be preserved')
+  })
+
   test('moves oversized Kiro tool descriptions into the system prompt', () => {
     const longDescription = 'Long tool documentation. '.repeat(600)
     const payload = buildKiroPayload({
