@@ -48,10 +48,6 @@ import { loadProviderKey } from '../../services/api/auth/api_key_manager.js'
 
 const KIRO_ENDPOINT = 'https://codewhisperer.us-east-1.amazonaws.com/generateAssistantResponse'
 const KIRO_MODELS_ENDPOINT = 'https://codewhisperer.us-east-1.amazonaws.com'
-// Default when the stored token blob lacks a profileArn (Builder-ID
-// users don't get one back from the device-code exchange). Matches the
-// reference DEFAULT_PROFILE_ARN in 9router-master/open-sse/services/usage.js.
-const DEFAULT_PROFILE_ARN = 'arn:aws:codewhisperer:us-east-1:638616132270:profile/AAAACCCCXXXX'
 // Kiro context window used when we have to estimate prompt tokens from
 // contextUsagePercentage (no metricsEvent was emitted). Claude/Kiro pairs
 // all use a 200k window.
@@ -250,7 +246,7 @@ export class KiroLane implements Lane {
       },
       body: JSON.stringify({
         origin: 'AI_EDITOR',
-        profileArn: this.profileArn ?? DEFAULT_PROFILE_ARN,
+        ...(this.profileArn ? { profileArn: this.profileArn } : {}),
       }),
     })
     if (!response.ok) return []
@@ -434,7 +430,7 @@ export class KiroLane implements Lane {
       // usually 8192 already, but clamp for safety.
       maxTokens: Math.min(max_tokens ?? 8192, 32_000),
       temperature,
-      profileArn: this.profileArn ?? DEFAULT_PROFILE_ARN,
+      profileArn: this.profileArn ?? undefined,
     })
 
     const messageId = `kiro-${Date.now()}`

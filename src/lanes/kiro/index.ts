@@ -4,9 +4,10 @@
  * Wires the Kiro lane into the dispatcher. Auth source: the OAuth token
  * + meta blob written by `/login kiro` at
  * `~/.config/claude-code/provider-keys.json:kiro_oauth`. Builder-ID users
- * don't get a profileArn from the device-code exchange; the lane falls
- * back to a known-public default on first call (social-login users have
- * a real profileArn stored in meta).
+ * don't get a profileArn from the device-code exchange; social-login
+ * users have a real profileArn stored in meta. Builder-ID users should
+ * omit profileArn; sending a stale public fallback can trigger
+ * CodeWhisperer "not authorized" errors.
  */
 
 export { kiroLane, KiroLane } from './loop.js'
