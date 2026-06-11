@@ -208,6 +208,7 @@ function findBinary(root, name) {
  * model missing — is swallowed; first-launch code retries what's missing.
  */
 function primeOllamaCloudModels() {
+  if (process.env.TAU_SKIP_OLLAMA_PREPULL === '1') return;
   // Detect ollama CLI first so we skip silently on machines without it.
   const probe = spawnSync('ollama', ['--version'], { stdio: 'ignore', timeout: 5000 });
   if (probe.status !== 0) return;
@@ -223,6 +224,23 @@ function primeOllamaCloudModels() {
     if (res.status === 0) ok += 1; else fail += 1;
   }
   console.log(`[tau] Ollama pre-pull: ${ok} ok, ${fail} skipped/failed (first launch will retry).`);
+}
+
+/**
+ * Verify every runtime dependency landed in node_modules, with a progress
+ * bar, and repair the tree if an interrupted/locked install left holes.
+ * Skipped when this postinstall was itself triggered by a repair run
+ * (TAU_REPAIR=1) to avoid recursion. Never fails the install — the CLI
+ * launcher re-checks and self-heals at startup as a second safety net.
+ */
+async function verifyDependencyTree() {
+  if (process.env.TAU_REPAIR === '1') return;
+  const { ensureDeps, manualFixInstructions } = await import('./verify-deps.mjs');
+  console.log('[tau] Verifying runtime dependencies...');
+  const ok = ensureDeps(packageRoot, { repair: true });
+  if (!ok) {
+    console.warn(`\n${manualFixInstructions('@abdoknbgit/tau')}\n`);
+  }
 }
 
 function runOptionalNativeBuild(scriptName, requiredEnvName) {
@@ -253,7 +271,8 @@ function buildOptionalNativeTools() {
 
 main()
   .catch(() => { /* never propagate — ripgrep is optional */ })
-  .finally(() => {
+  .finally(async () => {
+    try { await verifyDependencyTree(); } catch { /* swallow */ }
     try { buildOptionalNativeTools(); } catch { /* swallow */ }
     try { primeOllamaCloudModels(); } catch { /* swallow */ }
     process.exit(0);

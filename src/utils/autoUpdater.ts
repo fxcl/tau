@@ -16,6 +16,13 @@ import { ClaudeError, getErrnoCode, isENOENT } from './errors.js'
 import { execFileNoThrowWithCwd } from './execFileNoThrow.js'
 import { getFsImplementation } from './fsOperations.js'
 import { gracefulShutdownSync } from './gracefulShutdown.js'
+import {
+  cleanStaleBinShims,
+  extractEexistPath,
+  getGlobalPackageRoot,
+  removeConflictingShim,
+  verifyInstalledPackage,
+} from './installIntegrity.js'
 import { logError } from './log.js'
 import { gte, lt } from './semver.js'
 import { getInitialSettings } from './settings/settings.js'
@@ -455,6 +462,7 @@ export async function getVersionHistory(limit: number): Promise<string[]> {
 
 export async function installGlobalPackage(
   specificVersion?: string | null,
+  options: { interactive?: boolean } = {},
 ): Promise<InstallStatus> {
   const isAnthropicPackage = MACRO.PACKAGE_URL.startsWith('@anthropic-ai/')
   const productName = isAnthropicPackage ? 'Tau' : 'Tau'
@@ -498,10 +506,17 @@ To fix this issue:
       return 'install_failed'
     }
 
-    const { hasPermissions } = await checkGlobalInstallPermissions()
+    const { hasPermissions, npmPrefix } = await checkGlobalInstallPermissions()
     if (!hasPermissions) {
       return 'no_permissions'
     }
+
+    const isBun = env.isRunningWithBun()
+
+    // Interrupted updates can orphan the tau/claudex bin shims, which makes
+    // the next install abort with EEXIST. Clear ours/dangling shims first —
+    // npm recreates them as part of this install.
+    await cleanStaleBinShims(npmPrefix, isBun)
 
     // Use specific version if provided, otherwise use latest
     const packageSpec = specificVersion
@@ -510,18 +525,57 @@ To fix this issue:
 
     // Run from home directory to avoid reading project-level .npmrc/.bunfig.toml
     // which could be maliciously crafted to redirect to an attacker's registry
-    const packageManager = env.isRunningWithBun() ? 'bun' : 'npm'
-    const installResult = await execFileNoThrowWithCwd(
+    const packageManager = isBun ? 'bun' : 'npm'
+    let installResult = await execFileNoThrowWithCwd(
       packageManager,
       ['install', '-g', packageSpec],
       { cwd: homedir() },
     )
+
+    // EEXIST bin conflict: delete the conflicting shim npm named and retry
+    // once. This recovers machines whose previous update died mid-flight.
+    if (installResult.code !== 0) {
+      const conflictPath = extractEexistPath(
+        `${installResult.stdout}\n${installResult.stderr}`,
+      )
+      if (conflictPath) {
+        logForDebugging(
+          `installGlobalPackage: retrying after removing EEXIST conflict at ${conflictPath}`,
+        )
+        await removeConflictingShim(conflictPath)
+        installResult = await execFileNoThrowWithCwd(
+          packageManager,
+          ['install', '-g', packageSpec],
+          { cwd: homedir() },
+        )
+      }
+    }
+
     if (installResult.code !== 0) {
       const error = new AutoUpdaterError(
         `Failed to install new version of ${productName}: ${installResult.stdout} ${installResult.stderr}`,
       )
       logError(error)
       return 'install_failed'
+    }
+
+    // Verify the freshly installed tree is complete (and repair it if a
+    // locked file made npm leave holes) before declaring success.
+    if (!isBun) {
+      const packageRoot = await getGlobalPackageRoot()
+      if (packageRoot) {
+        const verified = await verifyInstalledPackage(packageRoot, {
+          interactive: options.interactive,
+        })
+        if (!verified) {
+          logError(
+            new AutoUpdaterError(
+              `Installed ${productName} but its dependency tree is incomplete and could not be repaired`,
+            ),
+          )
+          return 'install_failed'
+        }
+      }
     }
 
     // Set installMethod to 'global' to track npm global installations

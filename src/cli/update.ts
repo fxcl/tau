@@ -64,7 +64,9 @@ async function updateTauFromNpm(): Promise<void> {
   )
   writeToStdout(`Installing ${MACRO.PACKAGE_URL}@${latestVersion} globally...\n`)
 
-  const status = await installGlobalPackage(latestVersion)
+  const status = await installGlobalPackage(latestVersion, {
+    interactive: true,
+  })
   logForDebugging(`update: Tau npm installation status: ${status}`)
 
   switch (status) {
@@ -445,7 +447,7 @@ export async function update() {
     status = await installOrUpdateTauPackage(channel)
   } else {
     logForDebugging('update: Calling installGlobalPackage() for global update')
-    status = await installGlobalPackage()
+    status = await installGlobalPackage(null, { interactive: true })
   }
 
   logForDebugging(`update: Installation status: ${status}`)

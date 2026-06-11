@@ -32,6 +32,7 @@
     "build:bun": "bun run build.ts",
     "build:native-shell": "node scripts/build-native-shell-parser.mjs",
     "build:native-tools": "node scripts/build-native-tools.mjs",
+    "preinstall": "node scripts/preinstall.mjs",
     "postinstall": "node scripts/postinstall.mjs",
     "prepublishOnly": "node build.mjs"
   },

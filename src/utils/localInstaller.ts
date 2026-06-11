@@ -9,6 +9,7 @@ import { getClaudeConfigHomeDir } from './envUtils.js'
 import { getErrnoCode } from './errors.js'
 import { execFileNoThrowWithCwd } from './execFileNoThrow.js'
 import { getFsImplementation } from './fsOperations.js'
+import { verifyInstalledPackage } from './installIntegrity.js'
 import { logError } from './log.js'
 import { jsonStringify } from './slowOperations.js'
 
@@ -126,6 +127,20 @@ export async function installOrUpdateTauPackage(
       )
       logError(error)
       return result.code === 190 ? 'in_progress' : 'install_failed'
+    }
+
+    // Verify the dependency tree landed completely (interrupted installs on
+    // Windows can leave holes that crash the CLI at runtime).
+    const installedRoot = join(
+      getLocalInstallDir(),
+      'node_modules',
+      ...MACRO.PACKAGE_URL.split('/'),
+    )
+    if (!(await verifyInstalledPackage(installedRoot))) {
+      logError(
+        new Error('Local Tau install has an incomplete dependency tree'),
+      )
+      return 'install_failed'
     }
 
     // Set installMethod to 'local' to prevent npm permission warnings

@@ -10,7 +10,7 @@
 
 import { build } from 'esbuild'
 import { spawnSync } from 'child_process'
-import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
+import { existsSync, lstatSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { isAbsolute, join, resolve } from 'path'
 
 const pkg = JSON.parse(readFileSync('./package.json', 'utf8'))
@@ -235,7 +235,7 @@ const tauPlugin = {
 
 const result = await build({
   entryPoints: ['./src/entrypoints/cli.tsx'],
-  outfile: './dist/cli.mjs',
+  outfile: './dist/tau.mjs',
   platform: 'node',
   format: 'esm',
   bundle: true,
@@ -288,7 +288,7 @@ if (result.errors?.length) {
 
 // ─── Post-process bundle ───────────────────────────────────────────
 
-const outPath = './dist/cli.mjs'
+const outPath = './dist/tau.mjs'
 const code = readFileSync(outPath, 'utf8')
 if (!code.startsWith('#!')) {
   let patched = code
@@ -390,9 +390,55 @@ if (!React.useEffectEvent) {
   writeFileSync(outPath, `#!/usr/bin/env node\n${useEffectEventPolyfill}${patched}`)
 }
 
+// ─── Launcher (bin entry) ──────────────────────────────────────────
+//
+// `tau` / `claudex` point at dist/cli.mjs, which is now a tiny
+// dependency-free launcher: it verifies that every runtime dependency is
+// actually present in node_modules (interrupted updates and Windows EPERM
+// cleanup failures leave holes that otherwise surface later as raw
+// "Cannot find module" crashes), self-heals via scripts/verify-deps.mjs,
+// then loads the real bundle (dist/tau.mjs).
+
+const launcher = `#!/usr/bin/env node
+// Tau launcher - verifies the installed dependency tree, repairs incomplete
+// installs, then starts the CLI. Set TAU_SKIP_PREFLIGHT=1 to bypass.
+import { existsSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+
+const distDir = dirname(fileURLToPath(import.meta.url))
+const packageRoot = dirname(distDir)
+
+if (process.env.TAU_SKIP_PREFLIGHT !== '1') {
+  try {
+    const verifierPath = join(packageRoot, 'scripts', 'verify-deps.mjs')
+    if (existsSync(verifierPath)) {
+      const verifier = await import(pathToFileURL(verifierPath).href)
+      // Fast silent check first (<10ms); only show output when broken.
+      if (verifier.findMissingDeps(packageRoot).length > 0) {
+        process.stderr.write('[tau] Incomplete installation detected - repairing...\\n')
+        const ok = verifier.ensureDeps(packageRoot, { repair: true })
+        if (!ok) {
+          process.stderr.write('\\n' + verifier.manualFixInstructions(${JSON.stringify(pkg.name)}) + '\\n')
+          process.exit(1)
+        }
+      }
+    }
+  } catch {
+    // The preflight itself must never block startup; a genuinely broken
+    // tree still fails below with Node's own resolution error.
+  }
+}
+
+await import('./tau.mjs')
+`
+writeFileSync('./dist/cli.mjs', launcher)
+// Stale artifact from builds that bundled directly to cli.mjs.
+try { rmSync('./dist/cli.mjs.map', { force: true }) } catch { /* ignore */ }
+
 // Report size
 const outStat = readFileSync(outPath)
-console.log(`✓ Built dist/cli.mjs (${(outStat.length / 1024 / 1024).toFixed(1)} MB)`)
+console.log(`✓ Built dist/tau.mjs (${(outStat.length / 1024 / 1024).toFixed(1)} MB) + dist/cli.mjs launcher`)
 
 const nativeShellParserBuild = spawnSync(
   process.execPath,
