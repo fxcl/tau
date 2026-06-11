@@ -23,6 +23,8 @@ import type { PermissionResult } from '../../utils/permissions/PermissionResult.
 import { getPlatform } from '../../utils/platform.js';
 import { maybeRecordPluginHint } from '../../utils/plugins/hintRecommendation.js';
 import { exec } from '../../utils/Shell.js';
+import { getCwd } from '../../utils/cwd.js';
+import { getOriginalCwd } from '../../bootstrap/state.js';
 import type { ExecResult } from '../../utils/ShellCommand.js';
 import { SandboxManager } from '../../utils/sandbox/sandbox-adapter.js';
 import { semanticBoolean } from '../../utils/semanticBoolean.js';
@@ -33,6 +35,8 @@ import { getTaskOutputPath } from '../../utils/task/diskOutput.js';
 import { TaskOutput } from '../../utils/task/TaskOutput.js';
 import { isOutputLineTruncated } from '../../utils/terminal.js';
 import { buildLargeToolResultMessage, ensureToolResultsDir, generatePreview, getToolResultPath, PREVIEW_SIZE_BYTES } from '../../utils/toolResultStorage.js';
+import { validateCommandTargetExists } from '../BashTool/bashPreflightValidation.js';
+import { isSameBashCwd, resolveBashPathFrom } from '../BashTool/bashWorkdir.js';
 import { shouldUseSandbox } from '../BashTool/shouldUseSandbox.js';
 import { BackgroundHint } from '../BashTool/UI.js';
 import { buildImageToolResult, isImageOutput, resetCwdIfOutsideProject, resizeShellImageOutput, stdErrAppendShellResetMessage, stripEmptyLines } from '../BashTool/utils.js';
@@ -253,7 +257,8 @@ const outputSchema = lazySchema(() => z.object({
   persistedOutputSize: z.number().optional().describe('Total output size in bytes when persisted'),
   backgroundTaskId: z.string().optional().describe('ID of the background task if command is running in background'),
   backgroundedByUser: z.boolean().optional().describe('True if the user manually backgrounded the command with Ctrl+B'),
-  assistantAutoBackgrounded: z.boolean().optional().describe('True if the command was auto-backgrounded by the assistant-mode blocking budget')
+  assistantAutoBackgrounded: z.boolean().optional().describe('True if the command was auto-backgrounded by the assistant-mode blocking budget'),
+  cwdNote: z.string().optional().describe('Model-facing note stating the directory the command ran in / session cwd changes')
 }));
 type OutputSchema = ReturnType<typeof outputSchema>;
 export type Out = z.infer<OutputSchema>;
@@ -369,6 +374,18 @@ export const PowerShellTool = buildTool({
         };
       }
     }
+    // Same wrong-directory preflight as BashTool: verify the script/manifest
+    // a command targets exists in the directory it will run in, and point at
+    // the right workdir when it lives in a subdirectory.
+    const cwd = getCwd();
+    const targetCheck = await validateCommandTargetExists(input.command, input.workdir ? resolveBashPathFrom(cwd, input.workdir) : cwd);
+    if (!targetCheck.ok) {
+      return {
+        result: false,
+        message: targetCheck.message,
+        errorCode: 13
+      };
+    }
     return {
       result: true
     };
@@ -390,7 +407,8 @@ export const PowerShellTool = buildTool({
     persistedOutputSize,
     backgroundTaskId,
     backgroundedByUser,
-    assistantAutoBackgrounded
+    assistantAutoBackgrounded,
+    cwdNote
   }: Out, toolUseID: string): ToolResultBlockParam {
     // For image data, format as image content block for Claude
     if (isImage) {
@@ -431,7 +449,7 @@ export const PowerShellTool = buildTool({
     return {
       tool_use_id: toolUseID,
       type: 'tool_result' as const,
-      content: [processedStdout, errorMessage, backgroundInfo].filter(Boolean).join('\n'),
+      content: [processedStdout, errorMessage, cwdNote ? `[${cwdNote}]` : '', backgroundInfo].filter(Boolean).join('\n'),
       is_error: interrupted
     };
   },
@@ -452,6 +470,11 @@ export const PowerShellTool = buildTool({
     } = toolUseContext;
     const isMainThread = !toolUseContext.agentId;
     let progressCounter = 0;
+    // Snapshot before exec: executionDir is where this command will actually
+    // run (workdir override or session cwd). Used for the cwd-transparency
+    // note so the model always knows where a command ran (matches BashTool).
+    const cwdBeforeExec = getCwd();
+    const executionDir = input.workdir ? resolveBashPathFrom(cwdBeforeExec, input.workdir) : cwdBeforeExec;
     try {
       const commandGenerator = runPowerShellCommand({
         input,
@@ -635,6 +658,19 @@ export const PowerShellTool = buildTool({
         }
       }
       const finalStderr = [result.stderr || '', stderrForShellReset].filter(Boolean).join('\n');
+      // Cwd transparency: state where the command ran whenever that could
+      // differ from what the model assumes (matches BashTool's cwdNote).
+      let cwdNote: string | undefined;
+      if (!stderrForShellReset) {
+        const cwdAfter = getCwd();
+        if (!isSameBashCwd(executionDir, cwdAfter)) {
+          cwdNote = `Ran in ${executionDir} (one-off workdir). The session cwd is still ${cwdAfter}; pass workdir again to run the next command there.`;
+        } else if (!isSameBashCwd(cwdAfter, cwdBeforeExec)) {
+          cwdNote = `Shell cwd is now ${cwdAfter}`;
+        } else if (isMainThread && !isSameBashCwd(cwdAfter, getOriginalCwd())) {
+          cwdNote = `Shell cwd: ${cwdAfter}`;
+        }
+      }
       logEvent('tengu_powershell_tool_command_executed', {
         command_type: getCommandTypeForLogging(input.command),
         stdout_length: compressedStdout.length,
@@ -650,7 +686,8 @@ export const PowerShellTool = buildTool({
           returnCodeInterpretation: interpretation.message,
           isImage,
           persistedOutputPath,
-          persistedOutputSize
+          persistedOutputSize,
+          cwdNote
         }
       };
     } finally {

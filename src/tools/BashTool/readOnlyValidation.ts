@@ -5,7 +5,6 @@ import {
   splitCommand_DEPRECATED,
 } from '../../utils/bash/commands.js'
 import { tryParseShellCommand } from '../../utils/bash/shellQuote.js'
-import { getCwd } from '../../utils/cwd.js'
 import { isCurrentDirectoryBareGitRepo } from '../../utils/git.js'
 import type { PermissionResult } from '../../utils/permissions/PermissionResult.js'
 import { getPlatform } from '../../utils/platform.js'
@@ -24,6 +23,7 @@ import {
 import type { BashTool } from './BashTool.js'
 import { isNormalizedGitCommand } from './bashPermissions.js'
 import { bashCommandIsSafe_DEPRECATED } from './bashSecurity.js'
+import { resolveEffectiveBashCwd } from './bashWorkdir.js'
 import {
   COMMAND_OPERATION_TYPE,
   PATH_EXTRACTORS,
@@ -1878,6 +1878,7 @@ export function checkReadOnlyConstraints(
   compoundCommandHasCd: boolean,
 ): PermissionResult {
   const { command } = input
+  const cwd = resolveEffectiveBashCwd(input)
 
   // Detect if the command is not parseable and return early
   const result = tryParseShellCommand(command, env => `$${env}`)
@@ -1927,7 +1928,7 @@ export function checkReadOnlyConstraints(
   // 1. Deleted .git/HEAD to invalidate the normal git directory
   // 2. Created hooks/pre-commit or other git-internal files in the current directory
   // Git would then treat the cwd as the git directory and execute malicious hooks.
-  if (hasGitCommand && isCurrentDirectoryBareGitRepo()) {
+  if (hasGitCommand && isCurrentDirectoryBareGitRepo(cwd)) {
     return {
       behavior: 'passthrough',
       message:
@@ -1956,7 +1957,7 @@ export function checkReadOnlyConstraints(
   if (
     hasGitCommand &&
     SandboxManager.isSandboxingEnabled() &&
-    getCwd() !== getOriginalCwd()
+    cwd !== getOriginalCwd()
   ) {
     return {
       behavior: 'passthrough',

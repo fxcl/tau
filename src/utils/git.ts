@@ -873,9 +873,8 @@ function isLocalHost(host: string): boolean {
  * @returns true if the cwd looks like a bare/exploited git directory
  */
 /* eslint-disable custom-rules/no-sync-fs -- sync permission-eval check */
-export function isCurrentDirectoryBareGitRepo(): boolean {
+export function isCurrentDirectoryBareGitRepo(cwd = getCwd()): boolean {
   const fs = getFsImplementation()
-  const cwd = getCwd()
 
   const gitPath = join(cwd, '.git')
   try {

@@ -1,4 +1,7 @@
+import { getPlatform } from '../platform.js'
 import { rewriteWindowsNullRedirect } from './shellQuoting.js'
+
+type Platform = ReturnType<typeof getPlatform>
 
 /**
  * Defensive byte-level rewrites on bash command strings, applied before the
@@ -277,6 +280,69 @@ export function rewriteWindowsCmdAutoRun(command: string): string {
   )
 }
 
+/**
+ * Windows-native CLIs that take `/FLAG`-style arguments and have no MSYS
+ * equivalent shadowing them in Git Bash. Deliberately excludes names that a
+ * Unix tool or bash builtin shadows in Git Bash (whoami, sort, find, fc,
+ * timeout, more) — for those, doubling slashes would not change which
+ * program runs.
+ */
+const WINDOWS_SLASH_FLAG_TOOLS = [
+  'tasklist', 'taskkill', 'ipconfig', 'netsh', 'reg', 'sc', 'schtasks',
+  'wmic', 'icacls', 'attrib', 'takeown', 'robocopy', 'xcopy', 'findstr',
+  'where', 'tree', 'driverquery', 'powercfg', 'certutil', 'wevtutil',
+  'dism', 'sfc', 'chkdsk', 'systeminfo',
+] as const
+
+const WINDOWS_SLASH_FLAG_HEAD_REGEX = new RegExp(
+  `(?:^|[;&|(\\n])[ \\t]*(?:${WINDOWS_SLASH_FLAG_TOOLS.join('|')})(?:\\.exe)?\\b`,
+  'i',
+)
+
+const WINDOWS_SLASH_FLAG_SEGMENT_REGEX = new RegExp(
+  `(^|(?:;|&&|\\|\\||\\||\\n|\\()[ \\t]*)((?:${WINDOWS_SLASH_FLAG_TOOLS.join('|')})(?:\\.exe)?\\b[^;&|\\n]*)`,
+  'gi',
+)
+
+// A slash-flag token: whitespace, `/`, a flag word, optional `:value`/`=value`.
+// `/dev/null`, `/c/Users/...` and other paths contain a second `/` before the
+// token ends, so the trailing lookahead rejects them.
+const SLASH_FLAG_TOKEN_REGEX = /([ \t])\/([A-Za-z?][A-Za-z0-9]*(?:[:=][^\s]*)?)(?=[ \t]|$)/g
+
+/**
+ * Double the slash on `/FLAG` arguments of Windows-native CLIs so Git Bash
+ * passes them through intact. The MSYS runtime rewrites arguments that start
+ * with `/` into Windows paths when exec'ing a native binary, so
+ * `taskkill /PID 123 /F` reaches taskkill as garbage like
+ * `taskkill C:/Program Files/Git/PID 123 F:/`. The documented escape is
+ * doubling the slash: `//PID` arrives as `/PID`.
+ *
+ * Quote-aware (a `/text` inside a quoted argument is data, not a flag),
+ * heredoc-safe (bails out entirely — bodies may contain `/FLAG` as file
+ * content), and idempotent (`//FLAG` no longer matches). Only meaningful
+ * under Git Bash, so the composing pipeline gates it to Windows hosts.
+ */
+export function rewriteWindowsNativeToolSlashFlags(command: string): string {
+  if (command.includes('<<')) return command
+  if (!WINDOWS_SLASH_FLAG_HEAD_REGEX.test(command)) return command
+  const { mask } = scanAsciiQuotes(command)
+  return command.replace(
+    WINDOWS_SLASH_FLAG_SEGMENT_REGEX,
+    (match: string, prefix: string, segment: string, offset: number) => {
+      const segmentStart = offset + prefix.length
+      const rewritten = segment.replace(
+        SLASH_FLAG_TOKEN_REGEX,
+        (token: string, ws: string, flag: string, tokenOffset: number) => {
+          const slashIndex = segmentStart + tokenOffset + ws.length
+          if (mask[slashIndex]) return token
+          return `${ws}//${flag}`
+        },
+      )
+      return `${prefix}${rewritten}`
+    },
+  )
+}
+
 const UNSAFE_NODE_TASKKILL_SEGMENT_REGEX =
   /(^|(?:;|&&|\|\||\n)[ \t]*)([ \t]*taskkill(?:\.exe)?\b(?:(?!(?:;|&&|\|\||\n)).)*)/gi
 
@@ -309,8 +375,16 @@ export function rewriteUnsafeGlobalNodeTaskkill(command: string): string {
  * and control bytes already gone), then the quote-aware typography
  * normalizers (which depend on accurate ASCII-quote scanning), then the
  * dialect/redirect rewrites.
+ *
+ * All rewrites are OS-independent except the native slash-flag pass, which
+ * only applies on Windows hosts: on Linux/macOS a `/F` argument is a real
+ * path (e.g. `tree /F` lists the /F directory) and must not be touched —
+ * there the native Unix tools run untouched, exactly as written.
  */
-export function applyBashDefensiveRewrites(command: string): string {
+export function applyBashDefensiveRewrites(
+  command: string,
+  platform: Platform = getPlatform(),
+): string {
   let out = command
   out = stripCommandGarbage(out)
   out = normalizeUnicodeSpacesOutsideQuotes(out)
@@ -319,6 +393,9 @@ export function applyBashDefensiveRewrites(command: string): string {
   out = rewritePowerShellNullRedirect(out)
   out = rewriteWindowsReservedRedirects(out)
   out = rewriteWindowsCmdAutoRun(out)
+  if (platform === 'windows') {
+    out = rewriteWindowsNativeToolSlashFlags(out)
+  }
   out = rewriteUnsafeGlobalNodeTaskkill(out)
   return out
 }

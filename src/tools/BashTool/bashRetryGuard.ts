@@ -99,13 +99,14 @@ const _intentFailures = new Map<string, IntentEntry>()
  * Extract a normalized "signature" from a command for fuzzy matching.
  * Strips whitespace variations, trailing flags, and normalizes paths.
  */
-function commandSignature(command: string): string {
-  return command
+function commandSignature(command: string, workdir?: string): string {
+  const normalizedCommand = command
     .trim()
     .replace(/\s+/g, ' ')      // normalize whitespace
     .replace(/\s+2>&1\s*$/, '') // strip trailing 2>&1
     .replace(/\s*;\s*$/, '')    // strip trailing semicolons
     .toLowerCase()
+  return workdir ? `${workdir.toLowerCase()} :: ${normalizedCommand}` : normalizedCommand
 }
 
 /**
@@ -249,9 +250,9 @@ function purgeStale(): void {
  * both the per-signature tracker (exact-command retries) and the per-
  * intent tracker (same executable-set with cosmetic variations).
  */
-export function recordBashFailure(command: string, exitCode: number, output: string): void {
+export function recordBashFailure(command: string, exitCode: number, output: string, workdir?: string): void {
   purgeStale()
-  const sig = commandSignature(command)
+  const sig = commandSignature(command, workdir)
   const existing = _failures.get(sig)
   if (existing) {
     existing.attempts++
@@ -299,8 +300,8 @@ export function recordBashFailure(command: string, exitCode: number, output: str
  * Also clears ALL failures if this was a diagnostic command
  * (the model is investigating, so let it retry after).
  */
-export function recordBashSuccess(command: string): void {
-  const sig = commandSignature(command)
+export function recordBashSuccess(command: string, workdir?: string): void {
+  const sig = commandSignature(command, workdir)
   _failures.delete(sig)
 
   // Intent tracker: if any executable in this command overlaps a tracked
@@ -329,12 +330,12 @@ function truncateForList(s: string, max = 120): string {
  * Check if a command should be blocked due to repeated failures.
  * Returns null if allowed, or an error message if blocked.
  */
-export function checkBashRetryGuard(command: string): string | null {
+export function checkBashRetryGuard(command: string, workdir?: string): string | null {
   purgeStale()
   purgeStaleIntent()
 
   // 1) Per-signature check (exact-command retries)
-  const sig = commandSignature(command)
+  const sig = commandSignature(command, workdir)
   const entry = _failures.get(sig)
   if (entry && entry.attempts >= MAX_RETRIES_BEFORE_BLOCK) {
     const diagnosticSuggestions = buildDiagnosticSuggestions(command)

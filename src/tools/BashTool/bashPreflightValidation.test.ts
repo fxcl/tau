@@ -4,7 +4,7 @@
  * Run: bun run src/tools/BashTool/bashPreflightValidation.test.ts
  */
 
-import { mkdirSync, mkdtempSync, rmSync } from 'fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { normalizeForFs, validateBashExecutionPreflight } from './bashPreflightValidation.js'
@@ -101,8 +101,8 @@ async function main(): Promise<void> {
 
     await test('normalizeForFs translates Git Bash drive paths on Windows', () => {
       assert(
-        normalizeForFs('/c/Users/ok/Desktop/test2-teamode/backend', 'windows') ===
-          'C:\\Users\\ok\\Desktop\\test2-teamode\\backend',
+        normalizeForFs('/c/Workspace/site/backend', 'windows') ===
+          'C:\\Workspace\\site\\backend',
         'Git Bash drive form should convert',
       )
       assert(
@@ -170,6 +170,112 @@ async function main(): Promise<void> {
       )
 
       assert(result.ok, `expected POSIX cd target to be accepted on Windows; got: ${result.ok ? 'ok' : result.message}`)
+    })
+    await test('blocks script run from wrong directory and suggests workdir', async () => {
+      const api = join(root, 'api')
+      mkdirSync(api, { recursive: true })
+      writeFileSync(join(api, 'server.js'), '// fixture')
+
+      const result = await validateBashExecutionPreflight(
+        { command: 'node server.js' },
+        root,
+      )
+
+      assert(!result.ok, 'expected missing script target to be blocked')
+      assert(
+        !result.ok && result.message.includes('does not exist'),
+        `expected missing-target reason, got: ${result.ok ? 'ok' : result.message}`,
+      )
+      assert(
+        !result.ok && result.message.includes('workdir'),
+        'expected workdir suggestion',
+      )
+      assert(
+        !result.ok && result.message.includes('api'),
+        'expected the real directory in the suggestion',
+      )
+    })
+
+    await test('allows script run when the file exists in the execution dir', async () => {
+      const result = await validateBashExecutionPreflight(
+        { command: 'node server.js', workdir: 'api' },
+        root,
+      )
+
+      assert(
+        result.ok,
+        `expected existing script target to pass, got: ${result.ok ? 'ok' : result.message}`,
+      )
+    })
+
+    await test('allows script referenced by its correct relative path', async () => {
+      const result = await validateBashExecutionPreflight(
+        { command: 'node api/server.js' },
+        root,
+      )
+
+      assert(result.ok, 'expected correct relative path to pass')
+    })
+
+    await test('blocks missing script and reports nothing found nearby', async () => {
+      const result = await validateBashExecutionPreflight(
+        { command: 'python does_not_exist_anywhere.py' },
+        root,
+      )
+
+      assert(!result.ok, 'expected missing script to be blocked')
+      assert(
+        !result.ok && result.message.includes('Searched nearby subdirectories'),
+        'expected not-found-nearby message',
+      )
+    })
+
+    await test('does not block dynamic or non-file script arguments', async () => {
+      const dynamic = await validateBashExecutionPreflight(
+        { command: 'node "$SCRIPT_PATH"' },
+        root,
+      )
+      assert(dynamic.ok, 'dynamic argument must pass')
+
+      const inlineCode = await validateBashExecutionPreflight(
+        { command: 'python -c "print(1)"' },
+        root,
+      )
+      assert(inlineCode.ok, 'inline code must pass')
+
+      const plainCommand = await validateBashExecutionPreflight(
+        { command: 'git status' },
+        root,
+      )
+      assert(plainCommand.ok, 'non-interpreter command must pass')
+    })
+
+    await test('blocks npm command when package.json is only in a subdirectory', async () => {
+      writeFileSync(join(root, 'api', 'package.json'), '{}')
+
+      const result = await validateBashExecutionPreflight(
+        { command: 'npm install' },
+        root,
+      )
+
+      assert(!result.ok, 'expected manifest preflight to block')
+      assert(
+        !result.ok && result.message.includes('package.json'),
+        'expected manifest reason',
+      )
+      assert(
+        !result.ok && result.message.includes('api'),
+        'expected the manifest directory in the suggestion',
+      )
+    })
+
+    await test('allows npm command when package.json exists in the execution dir', async () => {
+      const result = await validateBashExecutionPreflight(
+        { command: 'npm install', workdir: 'api' },
+        root,
+      )
+
+      assert(result.ok, 'expected manifest in workdir to pass')
     })
   } finally {
     rmSync(root, { recursive: true, force: true })

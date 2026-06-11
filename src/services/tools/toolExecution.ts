@@ -37,6 +37,10 @@ import {
 } from '../../Tool.js'
 import type { BashToolInput } from '../../tools/BashTool/BashTool.js'
 import { startSpeculativeClassifierCheck } from '../../tools/BashTool/bashPermissions.js'
+import {
+  normalizeBashExecutionInput,
+  resolveEffectiveBashCwd,
+} from '../../tools/BashTool/bashWorkdir.js'
 import { BASH_TOOL_NAME } from '../../tools/BashTool/toolName.js'
 import { FILE_EDIT_TOOL_NAME } from '../../tools/FileEditTool/constants.js'
 import { FILE_READ_TOOL_NAME } from '../../tools/FileReadTool/prompt.js'
@@ -824,11 +828,13 @@ async function checkPermissionsAndCallTool(
     'command' in parsedInput.data
   ) {
     const appState = toolUseContext.getAppState()
+    const bashInput = normalizeBashExecutionInput(parsedInput.data as BashToolInput)
     startSpeculativeClassifierCheck(
-      (parsedInput.data as BashToolInput).command,
+      bashInput.command,
       appState.toolPermissionContext,
       toolUseContext.abortController.signal,
       toolUseContext.options.isNonInteractiveSession,
+      resolveEffectiveBashCwd(bashInput),
     )
   }
 

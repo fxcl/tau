@@ -124,18 +124,14 @@ function useCanUseTool(setToolUseConfirmQueue, setToolPermissionContext) {
                 return;
               }
               if (feature("BASH_CLASSIFIER") && result.pendingClassifierCheck && tool.name === BASH_TOOL_NAME && !appState.toolPermissionContext.awaitAutomatedChecksBeforeDialog) {
-                const speculativePromise = peekSpeculativeClassifierCheck((input as {
-                  command: string;
-                }).command);
+                const speculativePromise = peekSpeculativeClassifierCheck(result.pendingClassifierCheck.command, result.pendingClassifierCheck.cwd);
                 if (speculativePromise) {
                   const raceResult = await Promise.race([speculativePromise.then(_temp), new Promise(_temp2)]);
                   if (ctx.resolveIfAborted(resolve)) {
                     return;
                   }
                   if (raceResult.type === "result" && raceResult.result.matches && raceResult.result.confidence === "high" && feature("BASH_CLASSIFIER")) {
-                    consumeSpeculativeClassifierCheck((input as {
-                      command: string;
-                    }).command);
+                    consumeSpeculativeClassifierCheck(result.pendingClassifierCheck.command, result.pendingClassifierCheck.cwd);
                     const matchedRule = raceResult.result.matchedDescription ?? undefined;
                     if (matchedRule) {
                       setClassifierApproval(toolUseID, matchedRule);

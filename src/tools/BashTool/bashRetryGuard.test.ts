@@ -69,6 +69,19 @@ function main(): void {
     assert(block!.includes('failed 2 time(s)'), `expected attempts count, got: ${block}`)
   })
 
+  test('per-signature: distinguishes same command in different cwd', () => {
+    recordBashFailure('npm test', 1, '', '/repo')
+    recordBashFailure('npm test', 1, '', '/repo')
+
+    assert(
+      checkBashRetryGuard('npm test', '/repo/backend') === null,
+      'same command in a different cwd should be allowed',
+    )
+
+    const block = checkBashRetryGuard('npm test', '/repo')
+    assert(block !== null, 'same command in the same cwd should block')
+  })
+
   test('per-intent: blocks 3 distinct variants sharing executables', () => {
     // Simulate the transcript: same source+uvicorn chain, different paths.
     recordBashFailure('source /c/Users/a/.venv/Scripts/activate && uvicorn app:app', 1, 'err1')

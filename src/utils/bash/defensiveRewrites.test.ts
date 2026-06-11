@@ -11,6 +11,7 @@ import {
   rewritePowerShellNullRedirect,
   rewriteWindowsCmdAutoRun,
   rewriteUnsafeGlobalNodeTaskkill,
+  rewriteWindowsNativeToolSlashFlags,
   rewriteWindowsReservedRedirects,
   stripCommandGarbage,
 } from './defensiveRewrites.js'
@@ -272,6 +273,105 @@ function main(): void {
       rewriteUnsafeGlobalNodeTaskkill(input),
       input,
       'taskkill text inside another command must remain text',
+    )
+  })
+
+  console.log('\nrewriteWindowsNativeToolSlashFlags:')
+
+  test('doubles slash flags for taskkill PID kills', () => {
+    assertEqual(
+      rewriteWindowsNativeToolSlashFlags('taskkill /PID 17864 /F'),
+      'taskkill //PID 17864 //F',
+      'slash flags must double so Git Bash passes them through',
+    )
+  })
+
+  test('doubles slash flags but not quoted filter values', () => {
+    assertEqual(
+      rewriteWindowsNativeToolSlashFlags('tasklist /FI "PID eq 17864" /NH'),
+      'tasklist //FI "PID eq 17864" //NH',
+      'flags double, quoted value untouched',
+    )
+  })
+
+  test('handles colon-attached flag values', () => {
+    assertEqual(
+      rewriteWindowsNativeToolSlashFlags('findstr /C:TODO src.txt'),
+      'findstr //C:TODO src.txt',
+      'colon-value flags must double too',
+    )
+  })
+
+  test('does not touch slash-paths or redirects in the same segment', () => {
+    assertEqual(
+      rewriteWindowsNativeToolSlashFlags('tasklist /NH > /dev/null'),
+      'tasklist //NH > /dev/null',
+      'paths with a second slash must stay untouched',
+    )
+    assertEqual(
+      rewriteWindowsNativeToolSlashFlags('robocopy /c/src C:/dest /MIR'),
+      'robocopy /c/src C:/dest //MIR',
+      'POSIX and Windows path arguments must stay untouched',
+    )
+  })
+
+  test('does not touch non-listed tools', () => {
+    const node = 'node /c/app/server.js'
+    assertEqual(rewriteWindowsNativeToolSlashFlags(node), node, 'node untouched')
+    const grep = 'grep -r /etc/hosts .'
+    assertEqual(rewriteWindowsNativeToolSlashFlags(grep), grep, 'grep untouched')
+  })
+
+  test('does not touch slash flags inside quoted strings', () => {
+    assertEqual(
+      rewriteWindowsNativeToolSlashFlags('findstr /C:"a /b c" file.txt'),
+      'findstr //C:"a /b c" file.txt',
+      'the /b inside quotes is data, not a flag',
+    )
+  })
+
+  test('rewrites each tool segment in a compound command', () => {
+    assertEqual(
+      rewriteWindowsNativeToolSlashFlags('taskkill /PID 123 /F && rm -f app.db'),
+      'taskkill //PID 123 //F && rm -f app.db',
+      'only the native-tool segment is rewritten',
+    )
+  })
+
+  test('bails out on heredocs', () => {
+    const input = 'cat > kill.bat <<EOF\ntaskkill /PID 1 /F\nEOF'
+    assertEqual(rewriteWindowsNativeToolSlashFlags(input), input, 'heredoc untouched')
+  })
+
+  test('is idempotent', () => {
+    const once = rewriteWindowsNativeToolSlashFlags('ipconfig /all')
+    assertEqual(once, 'ipconfig //all', 'first pass doubles')
+    assertEqual(rewriteWindowsNativeToolSlashFlags(once), once, 'second pass no-op')
+  })
+
+  test('pipeline applies it on Windows and skips it elsewhere', () => {
+    assertEqual(
+      applyBashDefensiveRewrites('taskkill /PID 17864 /F', 'windows'),
+      'taskkill //PID 17864 //F',
+      'Windows hosts get the rewrite',
+    )
+    assertEqual(
+      applyBashDefensiveRewrites('tree /F', 'linux'),
+      'tree /F',
+      'on Linux /F is a real path argument and must stay untouched',
+    )
+    assertEqual(
+      applyBashDefensiveRewrites('tree /F', 'macos'),
+      'tree /F',
+      'macOS same as Linux',
+    )
+  })
+
+  test('still blocks node image kills after slash doubling', () => {
+    const out = applyBashDefensiveRewrites('taskkill /IM node.exe /F', 'windows')
+    assert(
+      out.includes('Blocked unsafe taskkill /IM node.exe'),
+      'doubled flags must still hit the node image guard',
     )
   })
 

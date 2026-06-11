@@ -5,7 +5,7 @@ import * as React from 'react';
 import type { CanUseToolFn } from 'src/hooks/useCanUseTool.js';
 import type { AppState } from 'src/state/AppState.js';
 import { z } from 'zod/v4';
-import { getKairosActive } from '../../bootstrap/state.js';
+import { getKairosActive, getOriginalCwd } from '../../bootstrap/state.js';
 import { TOOL_SUMMARY_MAX_LENGTH } from '../../constants/toolLimits.js';
 import { type AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS, logEvent } from '../../services/analytics/index.js';
 import { notifyVscodeFileUpdated } from '../../services/mcp/vscodeSdkMcp.js';
@@ -18,7 +18,7 @@ import { parseForSecurity } from '../../utils/bash/ast.js';
 import { splitCommand_DEPRECATED, splitCommandWithOperators } from '../../utils/bash/commands.js';
 import { extractClaudeCodeHints } from '../../utils/claudeCodeHints.js';
 import { detectCodeIndexingFromCommand } from '../../utils/codeIndexing.js';
-import { isEnvTruthy } from '../../utils/envUtils.js';
+import { isEnvTruthy, shouldMaintainProjectWorkingDir } from '../../utils/envUtils.js';
 import { isENOENT, ShellError } from '../../utils/errors.js';
 import { detectFileEncoding, detectLineEndings, getFileModificationTime, writeTextContent } from '../../utils/file.js';
 import { fileHistoryEnabled, fileHistoryTrackEdit } from '../../utils/fileHistory.js';
@@ -28,7 +28,9 @@ import { lazySchema } from '../../utils/lazySchema.js';
 import { expandPath } from '../../utils/path.js';
 import type { PermissionResult } from '../../utils/permissions/PermissionResult.js';
 import { maybeRecordPluginHint } from '../../utils/plugins/hintRecommendation.js';
-import { exec } from '../../utils/Shell.js';
+import { exec, setCwd } from '../../utils/Shell.js';
+import { getCwd } from '../../utils/cwd.js';
+import { pathInAllowedWorkingPath } from '../../utils/permissions/filesystem.js';
 import type { ExecResult } from '../../utils/ShellCommand.js';
 import { SandboxManager } from '../../utils/sandbox/sandbox-adapter.js';
 import { semanticBoolean } from '../../utils/semanticBoolean.js';
@@ -43,9 +45,16 @@ import { trackGitOperations } from '../shared/gitOperationTracking.js';
 import { bashToolHasPermission, commandHasAnyCd, matchWildcardPattern, permissionRuleExtractPrefix } from './bashPermissions.js';
 import { validateBashCommandPartsMatch } from './bashCommandParts.js';
 import { renderBashCommandPlan } from './bashCommandPlanner.js';
+import { detectDetachedBackgroundPattern } from './backgroundDetachValidation.js';
 import { appendBashFailureGuidance } from './bashFailureGuidance.js';
 import { validateBashExecutionPreflight } from './bashPreflightValidation.js';
 import { validateBashSyntax } from './bashSyntaxValidation.js';
+import {
+  isSameBashCwd,
+  normalizeBashExecutionInput,
+  normalizeBashExecutionInputInPlace,
+  resolveEffectiveBashCwd,
+} from './bashWorkdir.js';
 import { maybeAppendCommandHelp } from './commandHelp.js';
 import { checkBashRetryGuard, recordBashFailure, recordBashSuccess } from './bashRetryGuard.js';
 import { getPlatform } from '../../utils/platform.js';
@@ -285,7 +294,8 @@ For commands that are harder to parse at a glance (piped commands, obscure flags
   _simulatedSedEdit: z.object({
     filePath: z.string(),
     newContent: z.string()
-  }).optional().describe('Internal: pre-computed sed edit result from preview')
+  }).optional().describe('Internal: pre-computed sed edit result from preview'),
+  _workdirFromCd: z.boolean().optional().describe('Internal: set when a leading `cd <dir> &&` was converted into workdir, so the session cwd can persist like a real shell')
 }));
 
 // Always omit _simulatedSedEdit from the model-facing schema. It is an internal-only
@@ -295,9 +305,11 @@ For commands that are harder to parse at a glance (piped commands, obscure flags
 // Also conditionally remove run_in_background when background tasks are disabled.
 const inputSchema = lazySchema(() => isBackgroundTasksDisabled ? fullInputSchema().omit({
   run_in_background: true,
-  _simulatedSedEdit: true
+  _simulatedSedEdit: true,
+  _workdirFromCd: true
 }) : fullInputSchema().omit({
-  _simulatedSedEdit: true
+  _simulatedSedEdit: true,
+  _workdirFromCd: true
 }));
 type InputSchema = ReturnType<typeof inputSchema>;
 
@@ -333,7 +345,8 @@ const outputSchema = lazySchema(() => z.object({
   commandPlan: z.string().optional().describe('Dry-run command plan when plan_only is true'),
   structuredContent: z.array(z.any()).optional().describe('Structured content blocks'),
   persistedOutputPath: z.string().optional().describe('Path to the persisted full output in tool-results dir (set when output is too large for inline)'),
-  persistedOutputSize: z.number().optional().describe('Total size of the output in bytes (set when output is too large for inline)')
+  persistedOutputSize: z.number().optional().describe('Total size of the output in bytes (set when output is too large for inline)'),
+  cwdNote: z.string().optional().describe('Model-facing note stating the directory the command ran in / session cwd changes')
 }));
 type OutputSchema = ReturnType<typeof outputSchema>;
 export type Out = z.infer<OutputSchema>;
@@ -488,6 +501,7 @@ export const BashTool = buildTool({
     return this.isReadOnly?.(input) ?? false;
   },
   isReadOnly(input) {
+    input = normalizeBashExecutionInput(input);
     if (input.plan_only) {
       return true;
     }
@@ -584,6 +598,7 @@ export const BashTool = buildTool({
     return `Running ${desc}`;
   },
   async validateInput(input: BashToolInput): Promise<ValidationResult> {
+    input = normalizeBashExecutionInputInPlace(input);
     if (input.plan_only) {
       return {
         result: true
@@ -608,13 +623,23 @@ export const BashTool = buildTool({
     // Retry guard: block repeated identical failing commands to prevent
     // infinite loops. Non-frontier models retry the same broken command
     // 30+ times without diagnosing. This forces diagnostic-first behavior.
-    const retryBlock = checkBashRetryGuard(input.command);
+    const retryBlock = checkBashRetryGuard(input.command, resolveEffectiveBashCwd(input));
     if (retryBlock !== null) {
       return {
         result: false,
         message: retryBlock,
         errorCode: 12
       };
+    }
+    if (!isBackgroundTasksDisabled && !input.run_in_background) {
+      const detachPattern = detectDetachedBackgroundPattern(input.command);
+      if (detachPattern !== null) {
+        return {
+          result: false,
+          message: `Blocked: ${detachPattern}. Detached processes are untracked — they cannot be listed or stopped later, and they keep holding ports and file locks. Remove the \`&\` and set run_in_background: true instead: the process stays tracked, you are notified when it completes, and it can be stopped by task ID. For intentional in-command parallelism, end the command with \`wait\`. If the \`&\` is part of a URL or argument value, quote that argument — unquoted it backgrounds the command in bash.`,
+          errorCode: 10
+        };
+      }
     }
     if (feature('MONITOR_TOOL') && !isBackgroundTasksDisabled && !input.run_in_background) {
       const sleepPattern = detectBlockedSleepPattern(input.command);
@@ -647,6 +672,7 @@ export const BashTool = buildTool({
     };
   },
   async checkPermissions(input, context): Promise<PermissionResult> {
+    input = normalizeBashExecutionInput(input);
     if (input.plan_only) {
       return {
         behavior: 'allow',
@@ -682,7 +708,8 @@ export const BashTool = buildTool({
     assistantAutoBackgrounded,
     structuredContent,
     persistedOutputPath,
-    persistedOutputSize
+    persistedOutputSize,
+    cwdNote
   }, toolUseID): ToolResultBlockParam {
     // Handle structured content
     if (structuredContent && structuredContent.length > 0) {
@@ -737,11 +764,12 @@ export const BashTool = buildTool({
     return {
       tool_use_id: toolUseID,
       type: 'tool_result',
-      content: [processedStdout, errorMessage, backgroundInfo].filter(Boolean).join('\n'),
+      content: [processedStdout, errorMessage, cwdNote ? `[${cwdNote}]` : '', backgroundInfo].filter(Boolean).join('\n'),
       is_error: interrupted
     };
   },
   async call(input: BashToolInput, toolUseContext, _canUseTool?: CanUseToolFn, parentMessage?: AssistantMessage, onProgress?: ToolCallProgress<BashProgress>) {
+    input = normalizeBashExecutionInput(input);
     if (input.plan_only) {
       const plan = await renderBashCommandPlan(input);
       return {
@@ -774,6 +802,11 @@ export const BashTool = buildTool({
     let result: ExecResult;
     const isMainThread = !toolUseContext.agentId;
     const preventCwdChanges = !isMainThread;
+    // Snapshot before exec: executionDir is where this command will actually
+    // run (workdir override or session cwd). Used for cwd-transparency notes
+    // and failure guidance so the model always knows where a command ran.
+    const cwdBeforeExec = getCwd();
+    const executionDir = resolveEffectiveBashCwd(input, cwdBeforeExec);
     try {
       // Use the new async generator version of runShellCommand
       const commandGenerator = runShellCommand({
@@ -837,6 +870,20 @@ export const BashTool = buildTool({
         if (resetCwdIfOutsideProject(appState.toolPermissionContext)) {
           stderrForShellReset = stdErrAppendShellResetMessage('');
         }
+        // A model-written leading `cd X && …` was converted into a one-off
+        // workdir (bashWorkdir.ts), which intentionally skips the shell's own
+        // cwd capture. Mirror real shell semantics by persisting the cd target
+        // as the session cwd — but only inside approved working directories,
+        // the same boundary resetCwdIfOutsideProject enforces for a bare `cd`.
+        // Runs even when the command part failed: in a real shell, `cd X &&
+        // failing-cmd` still leaves you in X.
+        if (input._workdirFromCd && input.workdir && !result.preSpawnError && !shouldMaintainProjectWorkingDir() && !isSameBashCwd(executionDir, getCwd()) && pathInAllowedWorkingPath(executionDir, appState.toolPermissionContext)) {
+          try {
+            setCwd(executionDir);
+          } catch {
+            // Target vanished mid-command — keep the current session cwd
+          }
+        }
       }
 
       // Annotate output with sandbox violations if any (stderr is in stdout)
@@ -848,14 +895,14 @@ export const BashTool = buildTool({
         // stderr is merged into stdout (merged fd); outputWithSbFailures
         // already has the full output. Pass '' for stdout to avoid
         // duplication in getErrorParts() and processBashCommand.
-        const outputWithFailureGuidance = appendBashFailureGuidance(input.command, result.code, outputWithSbFailures);
+        const outputWithFailureGuidance = appendBashFailureGuidance(input.command, result.code, outputWithSbFailures, executionDir);
         // On usage/invalid-option failures, append the binary's own
         // --help (authoritative, version-exact). Reactive: only spawns
         // when failure output matches a usage pattern. 3s timeout per
         // lookup; session-lifetime cache so each command is fetched once.
         const outputWithVerifiedSyntax = await maybeAppendCommandHelp(input.command, outputWithFailureGuidance);
         // Record failure for retry guard before throwing
-        recordBashFailure(input.command, result.code, outputWithSbFailures);
+        recordBashFailure(input.command, result.code, outputWithSbFailures, executionDir);
         throw new ShellError('', outputWithVerifiedSyntax, result.code, result.interrupted);
       }
       wasInterrupted = result.interrupted;
@@ -941,11 +988,28 @@ export const BashTool = buildTool({
         isImage = false;
       }
     }
+    // Cwd transparency: state where the command ran whenever that could
+    // differ from what the model assumes — workdir overrides, persisted cd,
+    // or a session cwd that has drifted from the project root. This keeps the
+    // model anchored to the real directory in long sessions and after
+    // compaction, instead of relying on its memory of earlier `cd` calls.
+    let cwdNote: string | undefined;
+    if (!stderrForShellReset) {
+      const cwdAfter = getCwd();
+      if (!isSameBashCwd(executionDir, cwdAfter)) {
+        cwdNote = `Ran in ${executionDir} (one-off workdir). The session cwd is still ${cwdAfter}; pass workdir again to run the next command there.`;
+      } else if (!isSameBashCwd(cwdAfter, cwdBeforeExec)) {
+        cwdNote = `Shell cwd is now ${cwdAfter}`;
+      } else if (isMainThread && !isSameBashCwd(cwdAfter, getOriginalCwd())) {
+        cwdNote = `Shell cwd: ${cwdAfter}`;
+      }
+    }
     const data: Out = {
       stdout: compressedStdout,
       stderr: stderrForShellReset,
       interrupted: wasInterrupted,
       isImage,
+      cwdNote,
       returnCodeInterpretation: interpretationResult?.message,
       noOutputExpected: isSilentBashCommand(input.command),
       backgroundTaskId: result.backgroundTaskId,
@@ -956,7 +1020,7 @@ export const BashTool = buildTool({
       persistedOutputSize
     };
     // Record success for retry guard (clears failure tracking for this command)
-    recordBashSuccess(input.command);
+    recordBashSuccess(input.command, executionDir);
     return {
       data
     };

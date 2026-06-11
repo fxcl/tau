@@ -44,6 +44,137 @@ function main(): void {
     )
   })
 
+  test('locked-file guidance on POSIX uses native lsof/fuser and targeted kill', () => {
+    const guidance = buildBashFailureGuidance(
+      'rm -f data/app.db',
+      1,
+      "rm: cannot remove 'data/app.db': Device or resource busy",
+      undefined,
+      'linux',
+    )
+    assert(
+      guidance.includes('held by a running process'),
+      `expected lock reason, got: ${guidance}`,
+    )
+    assert(
+      guidance.includes('lsof') && guidance.includes('fuser'),
+      'expected native POSIX lookup tools',
+    )
+    assert(
+      guidance.includes('never kill every process of an image name'),
+      'expected targeted-kill guidance',
+    )
+    assert(
+      !guidance.includes('Stop-Process'),
+      'POSIX guidance must not suggest PowerShell cmdlets',
+    )
+  })
+
+  test('locked-file guidance on Windows avoids lsof and uses doubled-slash flags', () => {
+    const guidance = buildBashFailureGuidance(
+      'rm app.db',
+      1,
+      'The process cannot access the file because it is being used by another process.',
+      undefined,
+      'windows',
+    )
+    assert(
+      guidance.includes('held by a running process'),
+      `expected lock reason (not not-found), got: ${guidance}`,
+    )
+    assert(
+      guidance.includes('tasklist //FI') && guidance.includes('Stop-Process'),
+      'expected Windows-native lookup with doubled slashes',
+    )
+    assert(
+      guidance.includes('no lsof/fuser'),
+      'must warn that Git Bash lacks lsof/fuser',
+    )
+    assert(
+      guidance.includes('run_in_background'),
+      'expected tracked-background recommendation',
+    )
+  })
+
+  test('redirects Windows-only tools to native equivalents on POSIX hosts', () => {
+    const guidance = buildBashFailureGuidance(
+      'tasklist /FI "PID eq 123"',
+      127,
+      'bash: tasklist: command not found',
+      undefined,
+      'linux',
+    )
+    assert(
+      guidance.includes('Windows-only tools'),
+      `expected Windows-only redirect, got: ${guidance}`,
+    )
+    assert(
+      guidance.includes('ps aux') && guidance.includes('kill <PID>'),
+      'expected native process tool suggestions',
+    )
+  })
+
+  test('redirects lsof/fuser to PowerShell equivalents on Windows hosts', () => {
+    const guidance = buildBashFailureGuidance(
+      'lsof -i :8080',
+      127,
+      'bash: lsof: command not found',
+      undefined,
+      'windows',
+    )
+    assert(
+      guidance.includes('not available in Git Bash'),
+      `expected Git Bash limitation note, got: ${guidance}`,
+    )
+    assert(
+      guidance.includes('Get-NetTCPConnection'),
+      'expected PowerShell port lookup suggestion',
+    )
+  })
+
+  test('still classifies plain missing files as not found', () => {
+    const guidance = buildBashFailureGuidance(
+      'ls data/app.db',
+      2,
+      "ls: cannot access 'data/app.db': No such file or directory",
+    )
+    assert(
+      guidance.includes('was not found'),
+      `expected not-found reason, got: ${guidance}`,
+    )
+  })
+
+  test('includes Ran in line when execution dir is provided', () => {
+    const guidance = buildBashFailureGuidance(
+      'node server.js',
+      1,
+      "Error: Cannot find module 'C:\\Workspace\\app\\server.js'",
+      'C:\\Workspace\\app',
+    )
+    assert(
+      guidance.includes('- Ran in: C:\\Workspace\\app'),
+      `expected Ran in line, got: ${guidance}`,
+    )
+  })
+
+  test('omits Ran in line when execution dir is not provided', () => {
+    const guidance = buildBashFailureGuidance('false', 1, '')
+    assert(!guidance.includes('- Ran in:'), 'must omit Ran in line')
+  })
+
+  test('not-found guidance points at workdir parameter', () => {
+    const guidance = buildBashFailureGuidance(
+      'node server.js',
+      1,
+      'Error: ENOENT: no such file or directory',
+      '/c/workspace/app',
+    )
+    assert(
+      guidance.includes('workdir parameter'),
+      `expected workdir guidance, got: ${guidance}`,
+    )
+  })
+
   test('classifies missing file diagnostics generically', () => {
     const guidance = buildBashFailureGuidance(
       'cat /missing/file',
@@ -56,7 +187,7 @@ function main(): void {
       `expected not-found reason, got: ${guidance}`,
     )
     assert(
-      guidance.includes('List the parent location'),
+      guidance.includes('list the parent location'),
       'expected diagnostic next step',
     )
   })

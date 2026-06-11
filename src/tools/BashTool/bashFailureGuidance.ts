@@ -1,9 +1,13 @@
+import { getPlatform } from '../../utils/platform.js'
+
 const MAX_OUTPUT_SAMPLE_CHARS = 1_200
+
+type Platform = ReturnType<typeof getPlatform>
 
 type FailurePattern = {
   pattern: RegExp
   reason: string
-  guidance: string
+  guidance: string | ((platform: Platform) => string)
 }
 
 const FAILURE_PATTERNS: FailurePattern[] = [
@@ -14,10 +18,21 @@ const FAILURE_PATTERNS: FailurePattern[] = [
       'Check the command name, PATH, active shell, container image, and whether the required tool is installed.',
   },
   {
+    // Must precede the not-found pattern: Windows lock messages contain
+    // "cannot access" ("The process cannot access the file because it is
+    // being used by another process") and would be misclassified.
+    pattern: /\b(device or resource busy|resource busy or locked|text file busy|EBUSY|ETXTBSY|being used by another process|EPERM: operation not permitted, (?:unlink|rename|rmdir))\b/i,
+    reason: 'The target file, directory, or resource is held by a running process.',
+    guidance: platform =>
+      platform === 'windows'
+        ? 'Find the specific process holding it before retrying: powershell.exe -Command "Get-NetTCPConnection -LocalPort <port>" for a busy port, or tasklist //FI "PID eq <pid>" (double slashes — Git Bash mangles single-slash flags); Git Bash has no lsof/fuser. Then stop only that PID: kill <PID> or powershell.exe -Command "Stop-Process -Id <PID> -Force" — never kill every process of an image name. Prefer starting long-running processes with run_in_background so they stay tracked and stoppable by task ID.'
+        : 'Find the specific process holding it before retrying: lsof <path> or fuser <path>; for a busy port, lsof -i :<port> or fuser <port>/tcp. Then stop only that PID with kill <PID> — never kill every process of an image name (no broad killall/pkill). Prefer starting long-running processes with run_in_background so they stay tracked and stoppable by task ID.',
+  },
+  {
     pattern: /\b(no such file or directory|cannot access|not found)\b/i,
     reason: 'A referenced file, directory, resource, or name was not found.',
     guidance:
-      'List the parent location or query the owning system before retrying with a changed path or resource name.',
+      'First check the "Ran in" directory above: if the target lives elsewhere, re-run with the workdir parameter set to its directory (or use an absolute path). Otherwise list the parent location before retrying with a changed path or resource name.',
   },
   {
     pattern: /\b(permission denied|operation not permitted|access is denied)\b/i,
@@ -145,8 +160,27 @@ function looksLikeProjectTaskCommand(command: string): boolean {
   )
 }
 
-function commandContextGuidance(command: string): string[] {
+// Process/network tools that exist only on one OS family. Used to redirect
+// the model to the host's native equivalents instead of letting it retry a
+// tool that can never exist there.
+const WINDOWS_ONLY_TOOLS_REGEX =
+  /(^|[\s;&|(])(tasklist|taskkill|ipconfig|findstr|robocopy|xcopy|schtasks|wmic|icacls|driverquery)(\.exe)?\b/i
+const POSIX_ONLY_TOOLS_REGEX = /(^|[\s;&|(])(lsof|fuser)\b/i
+
+function commandContextGuidance(command: string, platform: Platform): string[] {
   const hints: string[] = []
+
+  if (platform !== 'windows' && WINDOWS_ONLY_TOOLS_REGEX.test(command)) {
+    hints.push(
+      'This command uses Windows-only tools that do not exist on this host. Use the native equivalents: ps aux / kill <PID> (processes), lsof -i :<port> (ports), ip addr or ifconfig (network), grep (search), cp -r or rsync (copy), chmod/chown (permissions), cron (scheduling).',
+    )
+  }
+
+  if (platform === 'windows' && POSIX_ONLY_TOOLS_REGEX.test(command)) {
+    hints.push(
+      'lsof and fuser are not available in Git Bash. Use powershell.exe -Command "Get-NetTCPConnection -LocalPort <port>" for ports or "Get-Process -Id <pid>" for processes, then kill <PID> or Stop-Process -Id <PID>.',
+    )
+  }
 
   if (hasPipeline(command) && !/\bpipefail\b/.test(command)) {
     hints.push(
@@ -170,7 +204,7 @@ function commandContextGuidance(command: string): string[] {
   if (cdTarget) {
     const quotedTarget = shellQuoteForHint(cdTarget)
     hints.push(
-      `This command depends on changing directories into ${quotedTarget}; before retrying, verify the active cwd and target with pwd && ls -la && test -d ${quotedTarget} && ls -la ${quotedTarget}. If the target is missing, locate the real project directory first.`,
+      `This command depends on changing directories into ${quotedTarget}; before retrying, verify the active cwd and target with pwd && ls -la && test -d ${quotedTarget} && ls -la ${quotedTarget}. If the target is missing, locate the real project directory first. Once found, prefer the workdir parameter over cd.`,
     )
   }
 
@@ -183,8 +217,12 @@ function commandContextGuidance(command: string): string[] {
   return hints
 }
 
-function appendCommandContextGuidance(guidance: string, command: string): string {
-  const hints = commandContextGuidance(command)
+function appendCommandContextGuidance(
+  guidance: string,
+  command: string,
+  platform: Platform,
+): string {
+  const hints = commandContextGuidance(command, platform)
   return hints.length > 0 ? `${guidance} ${hints.join(' ')}` : guidance
 }
 
@@ -199,6 +237,8 @@ export function buildBashFailureGuidance(
   command: string,
   exitCode: number,
   output: string,
+  ranIn?: string,
+  platform: Platform = getPlatform(),
 ): string {
   const outputSample = sampleOutput(output)
   const effectiveOutput =
@@ -211,16 +251,24 @@ export function buildBashFailureGuidance(
     ? 'The command returned a nonzero exit code.'
     : 'The command returned a nonzero exit code without diagnostic output.')
 
+  const matchedGuidance =
+    typeof matched?.guidance === 'function'
+      ? matched.guidance(platform)
+      : matched?.guidance
   const baseGuidance =
-    matched?.guidance ??
+    matchedGuidance ??
     (effectiveOutput
       ? 'Use the diagnostic output to identify the failing layer before retrying. Avoid repeated near-identical commands unless the next command tests a specific hypothesis.'
       : noDiagnosticGuidance(command))
-  const guidance = appendCommandContextGuidance(baseGuidance, command)
+  const guidance = appendCommandContextGuidance(baseGuidance, command, platform)
 
   return [
     'Bash failure analysis:',
     `- Exit code: ${exitCode}`,
+    // The execution directory is the most common silent failure cause for
+    // "file not found"-class errors — state it so the model can spot a
+    // wrong-directory run immediately instead of retrying blind.
+    ...(ranIn ? [`- Ran in: ${ranIn}`] : []),
     `- Reason: ${reason}`,
     `- Next step: ${guidance}`,
   ].join('\n')
@@ -230,8 +278,10 @@ export function appendBashFailureGuidance(
   command: string,
   exitCode: number,
   output: string,
+  ranIn?: string,
+  platform: Platform = getPlatform(),
 ): string {
   if (output.includes('Bash failure analysis:')) return output
-  const guidance = buildBashFailureGuidance(command, exitCode, output)
+  const guidance = buildBashFailureGuidance(command, exitCode, output, ranIn, platform)
   return output.trim() ? `${output.trimEnd()}\n\n${guidance}` : guidance
 }

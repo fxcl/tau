@@ -336,6 +336,7 @@ export function getSimplePrompt(): string {
         'Use POSIX redirects: `2>/dev/null` NOT `2>nul`. Writing to `nul` creates a literal file named `nul` (a Windows reserved name) that breaks git and other tools.',
         'Prefer forward slashes in arguments to native Windows binaries — they accept `/`, and avoid all escape ambiguity.',
         'Quote any path containing spaces with double quotes, AND prefer the `workdir` parameter for the working directory rather than `cd "/c/Path With Spaces" && cmd`.',
+        'Windows-native CLIs (tasklist, taskkill, reg, netsh, ipconfig, findstr, …) take `/FLAG` arguments that Git Bash mangles into paths; Tau auto-doubles them (`//FLAG`) so they work, but prefer the PowerShell equivalents when one exists: `Get-Process -Id`, `Stop-Process -Id <PID>`, `Get-NetTCPConnection -LocalPort <port>`. Git Bash has NO lsof/fuser.',
       ]
     : []
 
@@ -371,6 +372,8 @@ export function getSimplePrompt(): string {
     'Executes a given bash command and returns its output.',
     '',
     "The working directory persists between commands, but shell state does not. The shell environment is initialized from the user's profile (bash or zsh).",
+    '',
+    'Directory awareness: whenever a command runs anywhere other than the session cwd — or the session cwd itself moves or drifts from the project root — the result includes a bracketed note stating the directory it actually ran in. ALWAYS trust these notes over your memory of earlier `cd` calls, especially in long sessions. To run a command in another directory, pass the `workdir` parameter; a leading `cd <dir> && …` is automatically converted to `workdir` (and moves the session cwd only when <dir> is inside the approved working directories — otherwise the session cwd stays put and each command there needs its own `workdir`).',
     '',
     `IMPORTANT: Avoid using this tool to run ${avoidCommands} commands, unless explicitly instructed or after you have verified that a dedicated tool cannot accomplish your task. Instead, use the appropriate dedicated tool as this will provide a much better experience for the user:`,
     '',

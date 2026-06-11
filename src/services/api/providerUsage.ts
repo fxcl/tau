@@ -2261,7 +2261,6 @@ async function fetchCursorSpend(adminKey: string): Promise<{ summary: string; me
 async function fetchKiroUsage(token: string): Promise<unknown> {
   const blob = readStoredOAuth('kiro_oauth')
   const profileArn = readString(blob?.meta?.profileArn)
-    ?? 'arn:aws:codewhisperer:us-east-1:638616132270:profile/AAAACCCCXXXX'
   const params = new URLSearchParams({
     isEmailRequired: 'true',
     origin: 'AI_EDITOR',
@@ -2289,8 +2288,8 @@ async function fetchKiroUsage(token: string): Promise<unknown> {
       },
       body: JSON.stringify({
         origin: 'AI_EDITOR',
-        profileArn,
         resourceType: 'AGENTIC_REQUEST',
+        ...(profileArn ? { profileArn } : {}),
       }),
     }),
   ]

@@ -70,6 +70,10 @@ import { windowsPathToPosixPath } from '../../utils/windowsPaths.js'
 import { BashTool } from './BashTool.js'
 import { checkCommandOperatorPermissions } from './bashCommandHelpers.js'
 import {
+  normalizeBashExecutionInput,
+  resolveEffectiveBashCwd,
+} from './bashWorkdir.js'
+import {
   bashCommandIsSafeAsync_DEPRECATED,
   stripSafeHeredocSubstitutions,
 } from './bashSecurity.js'
@@ -1053,7 +1057,9 @@ export const bashToolCheckPermission = (
   compoundCommandHasCd?: boolean,
   astCommand?: SimpleCommand,
 ): PermissionResult => {
+  input = normalizeBashExecutionInput(input)
   const command = input.command.trim()
+  const cwd = resolveEffectiveBashCwd(input)
 
   // 1. Check exact match first
   const exactMatchResult = bashToolCheckExactMatchPermission(
@@ -1111,7 +1117,7 @@ export const bashToolCheckPermission = (
   // parseCommandArguments to return [] and silently skip path validation).
   const pathResult = checkPathConstraints(
     input,
-    getCwd(),
+    cwd,
     toolPermissionContext,
     compoundCommandHasCd,
     astCommand?.redirects,
@@ -1459,6 +1465,7 @@ function checkSemanticsDeny(
 function buildPendingClassifierCheck(
   command: string,
   toolPermissionContext: ToolPermissionContext,
+  cwd = getCwd(),
 ): { command: string; cwd: string; descriptions: string[] } | undefined {
   if (!isClassifierPermissionsEnabled()) {
     return undefined
@@ -1475,12 +1482,16 @@ function buildPendingClassifierCheck(
 
   return {
     command,
-    cwd: getCwd(),
+    cwd,
     descriptions: allowDescriptions,
   }
 }
 
 const speculativeChecks = new Map<string, Promise<ClassifierResult>>()
+
+function speculativeClassifierKey(command: string, cwd: string): string {
+  return `${cwd}\0${command}`
+}
 
 /**
  * Start a speculative bash allow classifier check early, so it runs in
@@ -1490,8 +1501,9 @@ const speculativeChecks = new Map<string, Promise<ClassifierResult>>()
  */
 export function peekSpeculativeClassifierCheck(
   command: string,
+  cwd = getCwd(),
 ): Promise<ClassifierResult> | undefined {
-  return speculativeChecks.get(command)
+  return speculativeChecks.get(speculativeClassifierKey(command, cwd))
 }
 
 export function startSpeculativeClassifierCheck(
@@ -1499,6 +1511,7 @@ export function startSpeculativeClassifierCheck(
   toolPermissionContext: ToolPermissionContext,
   signal: AbortSignal,
   isNonInteractiveSession: boolean,
+  cwd = getCwd(),
 ): boolean {
   // Same guards as buildPendingClassifierCheck
   if (!isClassifierPermissionsEnabled()) return false
@@ -1510,7 +1523,6 @@ export function startSpeculativeClassifierCheck(
   )
   if (allowDescriptions.length === 0) return false
 
-  const cwd = getCwd()
   const promise = classifyBashCommand(
     command,
     cwd,
@@ -1522,7 +1534,7 @@ export function startSpeculativeClassifierCheck(
   // Prevent unhandled rejection if the signal aborts before this promise is consumed.
   // The original promise (which may reject) is still stored in the Map for consumers to await.
   promise.catch(() => {})
-  speculativeChecks.set(command, promise)
+  speculativeChecks.set(speculativeClassifierKey(command, cwd), promise)
   return true
 }
 
@@ -1532,10 +1544,12 @@ export function startSpeculativeClassifierCheck(
  */
 export function consumeSpeculativeClassifierCheck(
   command: string,
+  cwd = getCwd(),
 ): Promise<ClassifierResult> | undefined {
-  const promise = speculativeChecks.get(command)
+  const key = speculativeClassifierKey(command, cwd)
+  const promise = speculativeChecks.get(key)
   if (promise) {
-    speculativeChecks.delete(command)
+    speculativeChecks.delete(key)
   }
   return promise
 }
@@ -1558,7 +1572,7 @@ export async function awaitClassifierAutoApproval(
   isNonInteractiveSession: boolean,
 ): Promise<PermissionDecisionReason | undefined> {
   const { command, cwd, descriptions } = pendingCheck
-  const speculativeResult = consumeSpeculativeClassifierCheck(command)
+  const speculativeResult = consumeSpeculativeClassifierCheck(command, cwd)
   const classifierResult = speculativeResult
     ? await speculativeResult
     : await classifyBashCommand(
@@ -1609,7 +1623,7 @@ export async function executeAsyncClassifierCheck(
   callbacks: AsyncClassifierCheckCallbacks,
 ): Promise<void> {
   const { command, cwd, descriptions } = pendingCheck
-  const speculativeResult = consumeSpeculativeClassifierCheck(command)
+  const speculativeResult = consumeSpeculativeClassifierCheck(command, cwd)
 
   let classifierResult: ClassifierResult
   try {
@@ -1665,6 +1679,8 @@ export async function bashToolHasPermission(
   context: ToolUseContext,
   getCommandSubcommandPrefixFn = getCommandSubcommandPrefix,
 ): Promise<PermissionResult> {
+  input = normalizeBashExecutionInput(input)
+  const effectiveCwd = resolveEffectiveBashCwd(input)
   let appState = context.getAppState()
 
   // 0. AST-based security parse. This replaces both tryParseShellCommand
@@ -1762,6 +1778,7 @@ export async function bashToolHasPermission(
             pendingClassifierCheck: buildPendingClassifierCheck(
               input.command,
               appState.toolPermissionContext,
+              effectiveCwd,
             ),
           }
         : {}),
@@ -1877,7 +1894,7 @@ export async function bashToolHasPermission(
         hasDeny
           ? classifyBashCommand(
               input.command,
-              getCwd(),
+              effectiveCwd,
               denyDescriptions,
               'deny',
               context.abortController.signal,
@@ -1887,7 +1904,7 @@ export async function bashToolHasPermission(
         hasAsk
           ? classifyBashCommand(
               input.command,
-              getCwd(),
+              effectiveCwd,
               askDescriptions,
               'ask',
               context.abortController.signal,
@@ -1962,6 +1979,7 @@ export async function bashToolHasPermission(
                 pendingClassifierCheck: buildPendingClassifierCheck(
                   input.command,
                   appState.toolPermissionContext,
+                  effectiveCwd,
                 ),
               }
             : {}),
@@ -2029,6 +2047,7 @@ export async function bashToolHasPermission(
                 pendingClassifierCheck: buildPendingClassifierCheck(
                   input.command,
                   appState.toolPermissionContext,
+                  effectiveCwd,
                 ),
               }
             : {}),
@@ -2044,7 +2063,7 @@ export async function bashToolHasPermission(
       // to .claude/settings.json without the cd+redirect block firing.
       const pathResult = checkPathConstraints(
         input,
-        getCwd(),
+        effectiveCwd,
         appState.toolPermissionContext,
         commandHasAnyCd(input.command),
         astRedirects,
@@ -2066,6 +2085,7 @@ export async function bashToolHasPermission(
               pendingClassifierCheck: buildPendingClassifierCheck(
                 input.command,
                 appState.toolPermissionContext,
+                effectiveCwd,
               ),
             }
           : {}),
@@ -2133,6 +2153,7 @@ export async function bashToolHasPermission(
                 pendingClassifierCheck: buildPendingClassifierCheck(
                   input.command,
                   appState.toolPermissionContext,
+                  effectiveCwd,
                 ),
               }
             : {}),
@@ -2144,7 +2165,7 @@ export async function bashToolHasPermission(
   // Split into subcommands. Prefer the AST-extracted spans; fall back to
   // splitCommand only when tree-sitter was unavailable. The cd-cwd filter
   // strips the `cd ${cwd}` prefix that models like to prepend.
-  const cwd = getCwd()
+  const cwd = effectiveCwd
   const cwdMingw =
     getPlatform() === 'windows' ? windowsPathToPosixPath(cwd) : cwd
   const rawSubcommands =
@@ -2238,7 +2259,7 @@ export async function bashToolHasPermission(
   // command AFTER checking deny rules but BEFORE returning results.
   const subcommandPermissionDecisions = subcommands.map((command, i) =>
     bashToolCheckPermission(
-      { command },
+      { ...input, command },
       appState.toolPermissionContext,
       compoundCommandHasCd,
       astCommandsByIdx[i],
@@ -2275,7 +2296,7 @@ export async function bashToolHasPermission(
   // that can silently hide redirect operators).
   const pathResult = checkPathConstraints(
     input,
-    getCwd(),
+    cwd,
     appState.toolPermissionContext,
     compoundCommandHasCd,
     astRedirects,
@@ -2324,6 +2345,7 @@ export async function bashToolHasPermission(
             pendingClassifierCheck: buildPendingClassifierCheck(
               input.command,
               appState.toolPermissionContext,
+              effectiveCwd,
             ),
           }
         : {}),
@@ -2405,7 +2427,7 @@ export async function bashToolHasPermission(
   appState = context.getAppState() // re-compute the latest in case the user hit shift+tab
   if (subcommands.length === 1) {
     const result = await checkCommandAndSuggestRules(
-      { command: subcommands[0]! },
+      { ...input, command: subcommands[0]! },
       appState.toolPermissionContext,
       commandSubcommandPrefix,
       compoundCommandHasCd,
@@ -2423,6 +2445,7 @@ export async function bashToolHasPermission(
               pendingClassifierCheck: buildPendingClassifierCheck(
                 input.command,
                 appState.toolPermissionContext,
+                effectiveCwd,
               ),
             }
           : {}),
@@ -2550,6 +2573,7 @@ export async function bashToolHasPermission(
           pendingClassifierCheck: buildPendingClassifierCheck(
             input.command,
             appState.toolPermissionContext,
+            effectiveCwd,
           ),
         }
       : {}),

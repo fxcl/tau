@@ -24,11 +24,15 @@ export function renderToolUseMessage(input: Partial<PowerShellToolInput>, {
   theme: ThemeName;
 }): React.ReactNode {
   const {
-    command
+    command,
+    workdir
   } = input;
   if (!command) {
     return null;
   }
+  // Show the one-off working directory so the user can see where the
+  // command actually runs without expanding the result.
+  const workdirSuffix = workdir ? ` (in ${workdir})` : '';
   const displayCommand = command;
   if (!verbose) {
     const lines = displayCommand.split('\n');
@@ -42,10 +46,10 @@ export function renderToolUseMessage(input: Partial<PowerShellToolInput>, {
       if (truncated.length > MAX_COMMAND_DISPLAY_CHARS) {
         truncated = truncated.slice(0, MAX_COMMAND_DISPLAY_CHARS);
       }
-      return <Text>{truncated.trim()}…</Text>;
+      return <Text>{truncated.trim()}…{workdirSuffix}</Text>;
     }
   }
-  return displayCommand;
+  return workdirSuffix ? `${displayCommand}${workdirSuffix}` : displayCommand;
 }
 export function renderToolUseProgressMessage(progressMessagesForMessage: ProgressMessage<PowerShellProgress>[], {
   verbose,
