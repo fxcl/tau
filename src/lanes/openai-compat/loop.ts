@@ -75,6 +75,8 @@ type ProviderType =
   | 'vercel'
   | 'requesty'
   | 'opencode'
+  | 'opencodego'
+  | 'fireworks'
   | 'cline'
   | 'iflow'
   | 'kilocode'
@@ -97,6 +99,10 @@ function detectProvider(model: string, baseUrl: string): ProviderType {
   if (b.includes('lxg2it') || b.includes('modelrouter')) return 'modelrouter'
   if (b.includes('ai-gateway.vercel') || b.includes('vercel')) return 'vercel'
   if (b.includes('requesty')) return 'requesty'
+  if (b.includes('fireworks.ai')) return 'fireworks'
+  // Go shares the opencode.ai host — match the `/zen/go` path first so it
+  // doesn't fall through to the Zen branch below.
+  if (b.includes('opencode.ai/zen/go')) return 'opencodego'
   if (b.includes('opencode.ai/zen') || b.includes('opencode.ai')) return 'opencode'
   if (b.includes('openrouter')) return 'openrouter'
   if (b.includes('cline.bot')) return 'cline'
@@ -156,6 +162,8 @@ interface OpenAIChatRequest {
   route?: string
   prompt_cache_key?: string
   prompt_cache_retention?: '24h'
+  // Fireworks: include perf_metrics (incl. cached-prompt-tokens) in the body.
+  perf_metrics_in_response?: boolean
   providerOptions?: {
     gateway?: {
       caching?: 'auto'
@@ -348,7 +356,7 @@ export class OpenAICompatLane implements Lane {
     const provider = cfg.provider
     const isLocal = isLocalBaseUrl(cfg.baseUrl)
     const cacheSessionId =
-      provider === 'copilot' || provider === 'openrouter' || provider === 'agentrouter' || provider === 'opencode' || provider === 'moonshot' || provider === 'mistral'
+      provider === 'copilot' || provider === 'openrouter' || provider === 'agentrouter' || provider === 'opencode' || provider === 'opencodego' || provider === 'moonshot' || provider === 'mistral' || provider === 'fireworks'
         ? sessionId
         : undefined
 
@@ -654,6 +662,20 @@ export class OpenAICompatLane implements Lane {
                 cacheWriteTokens = arWrite ?? 0
                 reportedCachedInputTokens = (arRead ?? 0) + (arWrite ?? 0)
               }
+            }
+          }
+
+          // Fireworks reports cached prompt tokens via perf_metrics
+          // (`cached-prompt-tokens`), which for streaming arrives in the
+          // final chunk when perf_metrics_in_response is set. The standard
+          // usage block omits prompt_tokens_details mid-stream, so fold this
+          // value into the cache-read count. Fireworks-only — no other
+          // provider's usage/billing path is touched. perf_metrics may ride
+          // on a chunk without `usage`, so it lives outside the block above.
+          if (provider === 'fireworks' && chunk.perf_metrics && typeof chunk.perf_metrics === 'object') {
+            const cached = (chunk.perf_metrics as Record<string, unknown>)['cached-prompt-tokens']
+            if (typeof cached === 'number' && cached > reportedCachedInputTokens) {
+              reportedCachedInputTokens = cached
             }
           }
 
@@ -2184,7 +2206,10 @@ function convertHistoryToOpenAI(
   // be passed back to the API". The DeepSeek-style conversion already
   // does exactly this carry-back, so reuse it for every reasoning-on
   // opencode row.
-  if (provider === 'opencode' && opencodeThinkingActive(model)) {
+  // OpenCode Go shares Zen's gateway + upstreams, so the same reasoning
+  // carry-back applies — without it a thinking-on Go row 400s on the next
+  // tool turn ("reasoning_content must be passed back").
+  if ((provider === 'opencode' || provider === 'opencodego') && opencodeThinkingActive(model)) {
     return convertHistoryToOpenAIForDeepSeek(messages, systemText)
   }
   return convertHistoryToOpenAIDefault(messages, systemText)

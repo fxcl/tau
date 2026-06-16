@@ -476,7 +476,7 @@ export function ProviderModelPicker({
 
       if (
         row?.kind === 'model'
-        && selectedProvider === 'opencode'
+        && (selectedProvider === 'opencode' || selectedProvider === 'opencodego')
         && isOpencodeThinkingModel(row.model.id)
       ) {
         cycleOpencodeEffort(row.model.id, key.leftArrow ? 'left' : 'right')
@@ -630,7 +630,7 @@ export function ProviderModelPicker({
               const isGlmThinking = selectedProvider === 'glm' && isGlmThinkingModel(model.id)
               const isClineThinking = selectedProvider === 'cline' && supportsClineThinkingSelection(model.id, model.tags)
               const clineEffort = isClineThinking ? getClineEffort(model.id) : undefined
-              const isOpencodeThinking = selectedProvider === 'opencode' && isOpencodeThinkingModel(model.id)
+              const isOpencodeThinking = (selectedProvider === 'opencode' || selectedProvider === 'opencodego') && isOpencodeThinkingModel(model.id)
               const opencodeEffort = isOpencodeThinking ? getOpencodeEffort(model.id) : undefined
               const isCommandCodeThinking =
                 selectedProvider === 'commandcode'
