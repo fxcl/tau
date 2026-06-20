@@ -236,13 +236,21 @@ const fullInputSchema = lazySchema(() => z.strictObject({
   description: z.string().optional().describe('Clear, concise description of what this command does in active voice.'),
   run_in_background: semanticBoolean(z.boolean().optional()).describe(`Set to true to run this command in the background. Use Read to read the output later.`),
   dangerouslyDisableSandbox: semanticBoolean(z.boolean().optional()).describe('Set this to true to dangerously override sandbox mode and run commands without sandboxing.'),
-  workdir: z.string().optional().describe('Optional working directory to run this command in. Absolute, or relative to the current session cwd. Use this INSTEAD of `Set-Location` / `cd` prefixes — it avoids quoting issues with paths that contain spaces and never changes the session cwd. Only affects this single invocation.')
+  workdir: z.string().optional().describe('Deprecated internal/back-compat execution directory. The model-facing schema omits this field; encode target directories in the command with absolute paths or native CLI location flags.')
 }));
 
-// Conditionally remove run_in_background from schema when background tasks are disabled
-const inputSchema = lazySchema(() => isBackgroundTasksDisabled ? fullInputSchema().omit({
-  run_in_background: true
-}) : fullInputSchema());
+// Hide workdir from the model-facing schema so directory targeting is encoded
+// in the command string itself. Re-wrap as a stripping z.object so older callers
+// that still include workdir do not crash schema parsing.
+const inputSchema = lazySchema(() => {
+  const omittedShape = (isBackgroundTasksDisabled ? fullInputSchema().omit({
+    run_in_background: true,
+    workdir: true
+  }) : fullInputSchema().omit({
+    workdir: true
+  })).shape;
+  return z.object(omittedShape);
+});
 type InputSchema = ReturnType<typeof inputSchema>;
 
 // Use fullInputSchema for the type to always include run_in_background
@@ -707,7 +715,7 @@ export const PowerShellTool = buildTool({
         if (autoWorkdir) {
           cwdNote = `Auto-located ${autoWorkdirLabel} in ${executionDir} and ran it by absolute path (${cwdBeforeExec} had none; session cwd unchanged).`;
         } else if (!isSameBashCwd(executionDir, cwdAfter)) {
-          cwdNote = `Ran in ${executionDir} (one-off workdir). The session cwd is still ${cwdAfter}; pass workdir again to run the next command there.`;
+          cwdNote = `Ran in ${executionDir} for this command only. The session cwd is still ${cwdAfter}; use an absolute path or this command's native location flag for follow-up commands there.`;
         } else if (!isSameBashCwd(cwdAfter, cwdBeforeExec)) {
           cwdNote = `Shell cwd is now ${cwdAfter}`;
         } else if (isMainThread && !isSameBashCwd(cwdAfter, getOriginalCwd())) {

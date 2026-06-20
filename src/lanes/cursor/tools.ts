@@ -533,7 +533,6 @@ const CURSOR_EXTRA_TOOL_REGISTRY: LaneToolRegistration[] = [
       type: 'object',
       properties: {
         command: { type: 'string', description: 'Shell command to execute.' },
-        cwd: { type: 'string', description: 'Optional working directory override.' },
         description: { type: 'string', description: 'Brief description for the command.' },
         is_background: { type: 'boolean', description: 'Whether the command should keep running in the background.' },
       },
@@ -543,7 +542,8 @@ const CURSOR_EXTRA_TOOL_REGISTRY: LaneToolRegistration[] = [
       const input: Record<string, unknown> = { command: native.command }
       if (native.description) input.description = native.description
       if (native.is_background) input.run_in_background = native.is_background
-      // cwd → shared Bash `workdir` (one-off, quoting-safe), never `cd …`.
+      // Accept legacy directory keys from provider shims without advertising
+      // them to the model-facing schema.
       return applyShellWorkdir(input, native, ['cwd', 'workdir', 'dir_path'])
     },
     adaptOutput: _stringifyToolOutput,
@@ -693,7 +693,6 @@ const CURSOR_COMPAT_ALIAS_REGISTRY: LaneToolRegistration[] = [
       type: 'object',
       properties: {
         command: { type: 'string', description: 'Shell command to execute.' },
-        cwd: { type: 'string', description: 'Optional working directory override.' },
         description: { type: 'string', description: 'Brief description for the command.' },
       },
       required: ['command'],
@@ -701,7 +700,8 @@ const CURSOR_COMPAT_ALIAS_REGISTRY: LaneToolRegistration[] = [
     adaptInput(native) {
       const input: Record<string, unknown> = { command: native.command }
       if (native.description) input.description = native.description
-      // cwd / dir_path → shared Bash `workdir` (one-off), never `cd …`.
+      // Accept legacy directory keys from provider shims without advertising
+      // them to the model-facing schema.
       return applyShellWorkdir(input, native, ['cwd', 'dir_path', 'workdir'])
     },
     adaptOutput: _stringifyToolOutput,
@@ -1059,7 +1059,8 @@ export function resolveCursorToolCall(
     const input: Record<string, unknown> = { command: nativeInput.command }
     if (nativeInput.description) input.description = nativeInput.description
     if (nativeInput.is_background) input.run_in_background = nativeInput.is_background
-    // dir_path / cwd → shared Bash `workdir` (one-off), never `cd …`.
+    // Accept legacy directory keys from provider shims without advertising
+    // them to the model-facing schema.
     applyShellWorkdir(input, nativeInput, ['dir_path', 'cwd', 'workdir'])
     return { implId: 'Bash', input }
   }

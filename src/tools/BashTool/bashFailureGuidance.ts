@@ -33,14 +33,14 @@ const FAILURE_PATTERNS: FailurePattern[] = [
     reason: 'A POSIX path appears to have crossed a Windows/MSYS process boundary as a C: path.',
     guidance: platform =>
       platform === 'windows'
-        ? 'Treat this as Git Bash/MSYS argument conversion, not a syntax, workdir, or Compose-file error. Keep local host paths convertible, but exclude the remote argument from conversion or place the complete remote command in one quoted sh -c/bash -c string. For container, pod, SSH, WSL, ADB, or Hadoop paths, verify the target receives the original /path spelling.'
+        ? 'Treat this as Git Bash/MSYS argument conversion, not a syntax or Compose-file-location error. Keep local host paths convertible, but exclude the remote argument from conversion or place the complete remote command in one quoted sh -c/bash -c string. For container, pod, SSH, WSL, ADB, or Hadoop paths, verify the target receives the original /path spelling.'
         : 'Inspect the process boundary that supplied the path. A target expecting a POSIX or URI path received a Windows drive-qualified path instead.',
   },
   {
     pattern: /\b(no such file or directory|cannot access|not found)\b/i,
     reason: 'A referenced file, directory, resource, or name was not found.',
     guidance:
-      'First check the "Ran in" directory above: if the target lives elsewhere, re-run with the workdir parameter set to its directory (or use an absolute path). Otherwise list the parent location before retrying with a changed path or resource name.',
+      'First check the "Ran in" directory above: if the target lives elsewhere, retry with the target\'s absolute path or the command\'s native location/config flag. Otherwise list the parent location before retrying with a changed path or resource name.',
   },
   {
     pattern: /\b(permission denied|operation not permitted|access is denied)\b/i,
@@ -172,8 +172,8 @@ function looksLikeProjectTaskCommand(command: string): boolean {
 // than from an argument (dvc → dvc.yaml, terraform → *.tf, docker compose →
 // compose.yaml, …). When they fail there's no file path in argv to hint at the
 // right place, and a wrong cwd (the model sitting in another project's root) is
-// the usual cause — so steer to an absolute workdir explicitly instead of
-// letting it loop on the bare command.
+// the usual cause — so steer to explicit absolute paths/native location flags
+// instead of letting it loop on the bare command.
 const CONFIG_IN_CWD_TOOLS_REGEX =
   /(^|[\s;&|(])(dvc|terraform|tofu|dbt|snakemake|ansible-playbook|pulumi|skaffold|vagrant|nox|tox)(\.exe)?(?=\s|$)|(^|[\s;&|(])docker[\s-]compose\b/i
 
@@ -251,13 +251,13 @@ function commandContextGuidance(command: string, platform: Platform): string[] {
   if (cdTarget) {
     const quotedTarget = shellQuoteForHint(cdTarget)
     hints.push(
-      `This command depends on changing directories into ${quotedTarget}; before retrying, verify the active cwd and target with pwd && ls -la && test -d ${quotedTarget} && ls -la ${quotedTarget}. If the target is missing, locate the real project directory first. Once found, prefer the workdir parameter over cd.`,
+      `This command depends on changing directories into ${quotedTarget}; before retrying, verify the active cwd and target with pwd && ls -la && test -d ${quotedTarget} && ls -la ${quotedTarget}. If the target is missing, locate the real project directory first. Once found, put that absolute path in the command or use the CLI's native location flag instead of repeating cd.`,
     )
   }
 
   if (CONFIG_IN_CWD_TOOLS_REGEX.test(command)) {
     hints.push(
-      'This tool resolves its project/config from the working directory, not from an argument. If the project lives in a different directory than where this ran (above), retry with the workdir parameter set to that directory\'s ABSOLUTE path — the folder that contains its config (e.g. dvc.yaml, *.tf, compose.yaml). Do not cd, and do not repeat the bare command.',
+      'This tool resolves its project/config from the working directory, not from an ordinary argument. If the project lives in a different directory than where this ran (above), retry with that project\'s ABSOLUTE path encoded in the command: use the CLI\'s native location flag when it has one (for example docker compose -f <absolute-compose-file>, terraform -chdir=<absolute-dir>, git -C <absolute-dir>, npm --prefix <absolute-dir>) or pass the absolute config/file path. Do not repeat the bare command.',
     )
   }
 

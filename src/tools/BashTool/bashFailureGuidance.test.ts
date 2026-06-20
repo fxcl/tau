@@ -162,7 +162,7 @@ function main(): void {
     assert(!guidance.includes('- Ran in:'), 'must omit Ran in line')
   })
 
-  test('not-found guidance points at workdir parameter', () => {
+  test('not-found guidance points at explicit paths or native flags', () => {
     const guidance = buildBashFailureGuidance(
       'node server.js',
       1,
@@ -170,8 +170,12 @@ function main(): void {
       '/c/workspace/app',
     )
     assert(
-      guidance.includes('workdir parameter'),
-      `expected workdir guidance, got: ${guidance}`,
+      guidance.includes('absolute path') && guidance.includes('native location/config flag'),
+      `expected explicit path guidance, got: ${guidance}`,
+    )
+    assert(
+      !guidance.includes('workdir parameter'),
+      `must not steer toward workdir, got: ${guidance}`,
     )
   })
 
@@ -360,7 +364,7 @@ function main(): void {
       `expected MSYS path-conversion reason, got: ${guidance}`,
     )
     assert(
-      guidance.includes('not a syntax, workdir, or Compose-file error'),
+      guidance.includes('not a syntax or Compose-file-location error'),
       `expected root-cause correction, got: ${guidance}`,
     )
     assert(
@@ -369,7 +373,7 @@ function main(): void {
     )
   })
 
-  test('steers config-in-cwd tools (dvc) to an absolute workdir', () => {
+  test('steers config-in-cwd tools (dvc) to explicit absolute location', () => {
     const guidance = buildBashFailureGuidance(
       'dvc repro',
       253,
@@ -381,8 +385,15 @@ function main(): void {
       `expected config-in-cwd hint, got: ${guidance}`,
     )
     assert(
-      guidance.includes('workdir parameter') && guidance.includes('ABSOLUTE path'),
-      'expected absolute-workdir steering for dvc',
+      guidance.includes('ABSOLUTE path encoded in the command') &&
+        guidance.includes('docker compose -f') &&
+        guidance.includes('terraform -chdir') &&
+        guidance.includes('npm --prefix'),
+      `expected explicit-location steering for dvc, got: ${guidance}`,
+    )
+    assert(
+      !guidance.includes('workdir parameter'),
+      `must not steer toward workdir, got: ${guidance}`,
     )
   })
 

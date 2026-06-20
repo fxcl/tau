@@ -1,16 +1,15 @@
 /**
- * Shared contract for the "run this command in a directory" parameter on
- * lane-native shell tools.
+ * Shared compatibility for legacy "run this command in a directory" parameters
+ * on lane-native shell tools.
  *
- * Background — the bug this prevents:
- * Lanes that hand-roll their built-in shell schema (codex `shell`, gemini
- * `run_shell_command`, cursor `run_terminal_cmd`/`Shell`) each decided
- * independently how to let the model pick a working directory. They
- * diverged badly:
- *   - codex omitted it entirely → the model literally could not express a
- *     directory, so it retried the same wrong-cwd command forever.
- *   - gemini/cursor exposed `dir_path`/`cwd` but translated it into a
- *     `cd <dir> && <command>` prefix.
+ * Background:
+ * Earlier lane schemas exposed directory knobs (`workdir`, `dir_path`, `cwd`)
+ * so models could recover from wrong-cwd commands. That fixed one class of
+ * loop but taught models to depend on a separate execution-directory field
+ * instead of putting the target path in the command. The Bash/PowerShell
+ * resolvers now auto-locate common targets and bake absolute paths/native CLI
+ * location flags into the command string, so the model-facing schema should not
+ * advertise a second directory control surface.
  *
  * The shared Bash/PowerShell impls already have a first-class `workdir`
  * field that is strictly better than a cd-prefix:
@@ -21,9 +20,11 @@
  *     persists the cwd, which is a surprising side effect),
  *   - understood by the workdir preflight + the cwd-transparency note.
  *
- * So the contract every lane shell tool must follow is:
- *   1. advertise a directory parameter in the schema the model sees, and
- *   2. map it to the shared impl's `workdir` field — never to a `cd …`.
+ * Current contract:
+ *   1. do NOT advertise a directory parameter in the schema the model sees;
+ *      prompts should teach absolute paths or native CLI location flags instead.
+ *   2. if an older provider shim still sends a directory key, map it to the
+ *      shared impl's internal `workdir` field — never to a `cd …` prefix.
  *
  * Lanes keep their NATIVE parameter name (the model was post-trained on
  * it); only the mapping target is standardized. New lanes should reuse
@@ -31,17 +32,14 @@
  * in shell_workdir.test.ts enforces it.
  */
 
-/** Model-facing description for the directory parameter. Shared so every
- *  lane describes the one-off, no-`cd` semantics identically. */
+/** Deprecated legacy description. New model-facing shell schemas should not
+ * expose a directory parameter. */
 export const SHELL_WORKDIR_PARAM_DESCRIPTION =
-  'Optional. Directory to run THIS command in — absolute, or relative to the session directory. '
-  + 'Use this INSTEAD of `cd path && command`. It is a one-off: it does not change the session '
-  + 'directory, so pass it again on the next command if you want to stay there.'
+  'Deprecated legacy directory parameter. Prefer absolute paths or native CLI location flags in the command.'
 
 /**
- * JSON-Schema property fragment for a workdir-style directory parameter.
- * Spread into a shell tool's `properties` under the lane's native key,
- * e.g. `properties: { command: …, workdir: shellWorkdirSchemaProperty() }`.
+ * Legacy JSON-Schema property fragment for compatibility only. New shell tool
+ * schemas should not spread this into model-facing properties.
  */
 export function shellWorkdirSchemaProperty(
   description: string = SHELL_WORKDIR_PARAM_DESCRIPTION,

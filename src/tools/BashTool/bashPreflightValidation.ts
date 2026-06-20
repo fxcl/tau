@@ -1,3 +1,4 @@
+import { existsSync } from 'fs'
 import { readdir, stat } from 'fs/promises'
 import { homedir } from 'os'
 import path from 'path'
@@ -405,7 +406,7 @@ function formatAmbiguousTargetMessage(
     ...dirs.map(dir => `- ${shellQuoteForHint(dir)}`),
     '',
     'Correction guidance:',
-    '- Re-run with the workdir parameter (or an explicit path) set to the one you mean.',
+    '- Re-run with the absolute path or the command\'s native location flag set to the one you mean.',
     '',
     'The command was not executed.',
   ].join('\n')
@@ -435,8 +436,8 @@ function pickWorkdir(
  * repeated command never loops on an un-actionable block: the shallowest
  * candidate relative to baseDir (nearest the run dir) wins, ties broken
  * alphabetically. Returns the pick plus the display paths of the rest so the
- * shell tools can note the alternatives ("also exists in …; pass workdir to
- * switch"). Pure + cross-platform (reuses displayWorkdir/caseFold).
+ * shell tools can note the alternatives. Pure + cross-platform (reuses
+ * displayWorkdir/caseFold).
  */
 export function resolveAmbiguousPick(
   dirs: string[],
@@ -504,6 +505,105 @@ function quotePathForShell(p: string, shell: AnchorShell): string {
     : `'${p.replace(/'/g, "''")}'`
 }
 
+function insertAfterLeadingRunner(
+  command: string,
+  runnerPattern: string,
+  insertion: string,
+): string | null {
+  const envAssignment = String.raw`(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|[^\s;&|]+)\s+)*`
+  const re = new RegExp(`(^\\s*${envAssignment}(?:${runnerPattern}))(?=$|[\\s;&|])`, 'i')
+  const match = re.exec(command)
+  if (!match) return null
+  const end = match.index + match[1]!.length
+  return `${command.slice(0, end)} ${insertion}${command.slice(end)}`
+}
+
+function firstExecutableBase(command: string): string | null {
+  const tokens = tokenizeSegment(firstCommandSegment(command))
+  let i = 0
+  while (i < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[i]!)) i++
+  return tokens[i]
+    ?.replace(/\.exe$/i, '')
+    .split(/[\\/]/)
+    .pop()
+    ?.toLowerCase() ?? null
+}
+
+function commandHasFlag(command: string, flags: Set<string>): boolean {
+  const tokens = tokenizeSegment(firstCommandSegment(command))
+  return tokens.some(token => flags.has(token.split('=')[0]!.toLowerCase()))
+}
+
+function findComposeFileInDirSync(absDir: string): string | null {
+  const fsDir = normalizeForFs(absDir)
+  for (const name of COMPOSE_FILE_NAMES) {
+    const candidate = path.join(fsDir, name)
+    try {
+      if (existsSync(candidate)) return candidate
+    } catch {
+      // Keep anchoring conservative; failure falls back to the generic wrapper.
+    }
+  }
+  return null
+}
+
+function anchorComposeCommand(
+  command: string,
+  absDir: string,
+  shell: AnchorShell,
+  platform: Platform,
+): string | null {
+  if (!extractComposeInvocation(command)) return null
+  const composeFile = findComposeFileInDirSync(absDir)
+  if (!composeFile) return null
+  const fileArg = quotePathForShell(spellAbsolutePath(composeFile, shell, platform), shell)
+  return insertAfterLeadingRunner(
+    command,
+    String.raw`(?:docker(?:\.exe)?\s+compose|docker-compose(?:\.exe)?|podman(?:\.exe)?\s+compose|podman-compose(?:\.exe)?)`,
+    `-f ${fileArg}`,
+  )
+}
+
+function anchorNativeLocationFlag(
+  command: string,
+  absDir: string,
+  shell: AnchorShell,
+  platform: Platform,
+): string | null {
+  const dirArg = quotePathForShell(spellAbsolutePath(absDir, shell, platform), shell)
+  const manifestRunner = extractManifestRunner(command)
+  if (manifestRunner === 'npm' && !commandHasFlag(command, new Set(['--prefix']))) {
+    return insertAfterLeadingRunner(command, String.raw`npm(?:\.exe)?`, `--prefix ${dirArg}`)
+  }
+  if (manifestRunner === 'yarn' && !commandHasFlag(command, new Set(['--cwd']))) {
+    return insertAfterLeadingRunner(command, String.raw`yarn(?:\.exe)?`, `--cwd ${dirArg}`)
+  }
+  if (manifestRunner === 'pnpm' && !commandHasFlag(command, new Set(['--dir', '-c']))) {
+    return insertAfterLeadingRunner(command, String.raw`pnpm(?:\.exe)?`, `--dir ${dirArg}`)
+  }
+
+  const head = firstExecutableBase(command)
+  if (head === 'git' && !commandHasFlag(command, new Set(['-c', '--git-dir', '--work-tree']))) {
+    return insertAfterLeadingRunner(command, String.raw`git(?:\.exe)?`, `-C ${dirArg}`)
+  }
+
+  const marker = matchProjectToolMarkers(command)
+  if (marker?.tools.some(tool => tool === 'make') && !commandHasFlag(command, new Set(['-c']))) {
+    return insertAfterLeadingRunner(command, String.raw`make(?:\.exe)?`, `-C ${dirArg}`)
+  }
+  if (
+    marker?.tools.some(tool => tool === 'terraform' || tool === 'tofu') &&
+    !commandHasFlag(command, new Set(['-chdir']))
+  ) {
+    const runner = firstExecutableBase(command)
+    if (runner === 'terraform' || runner === 'tofu') {
+      return insertAfterLeadingRunner(command, String.raw`${runner}(?:\.exe)?`, `-chdir=${dirArg}`)
+    }
+  }
+
+  return anchorComposeCommand(command, absDir, shell, platform)
+}
+
 /**
  * Replace the first standalone occurrence of `token` (optionally quoted) in
  * `command` with `replacement`. Bounded so it only matches a whole argument
@@ -555,6 +655,8 @@ export function anchorCommandToDir(
     if (rewritten !== command) return rewritten
     // Could not rewrite the arg (unexpected quoting) — fall back to a cwd change.
   }
+  const nativeAnchored = anchorNativeLocationFlag(command, absDir, shell, platform)
+  if (nativeAnchored) return nativeAnchored
   return wrapWithDirPrefix(command, absDir, shell, platform)
 }
 

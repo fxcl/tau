@@ -150,20 +150,21 @@ function main(): void {
 
   // ── wrong-directory loop escape ────────────────────────────────
   // The transcript bug: `dvc repro` run in the wrong root fails twice, gets
-  // blocked, and the model loops because nothing tells it to add a workdir.
+  // blocked, and the model loops because nothing points it at an explicit
+  // absolute project location.
   test('repeated project-tool failures do not expose a block message', () => {
     recordBashFailure('dvc repro', 253, "ERROR: 'dvc.yaml' does not exist")
     recordBashFailure('dvc repro', 253, "ERROR: 'dvc.yaml' does not exist")
     assert(checkBashRetryGuard('dvc repro') === null, 'repeated bare command must run')
   })
 
-  test('same command with an absolute workdir escapes the block', () => {
+  test('same command with a different absolute location remains runnable', () => {
     recordBashFailure('dvc repro', 253, 'err')
     recordBashFailure('dvc repro', 253, 'err')
     assert(checkBashRetryGuard('dvc repro') === null, 'bare repeat remains runnable')
     assert(
       checkBashRetryGuard('dvc repro', '/c/Users/ok/Desktop/real-dvc-project') === null,
-      'adding an absolute workdir is a new attempt and must be allowed',
+      'targeting a different absolute location is a new attempt and must be allowed',
     )
   })
 

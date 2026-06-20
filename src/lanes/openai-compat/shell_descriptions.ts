@@ -8,7 +8,8 @@
  * lane (DeepSeek, GLM, Moonshot, MiniMax, Groq, OpenRouter long-tail,
  * Ollama, LM Studio) drown in the volume and emit wrong-shell syntax —
  * PowerShell idioms in a bash command, missing quotes around paths with
- * spaces, `cd dir && cmd` instead of `workdir`, here-strings indented
+ * spaces, relying on cwd-changing prefixes instead of absolute paths/native
+ * location flags, here-strings indented
  * past column 0, etc.
  *
  * This module emits ~25-40 line descriptions per shell with concrete
@@ -60,11 +61,12 @@ function buildBashDescription(ctx: CompatShellDescriptionCtx): string {
     '- Search file contents → Grep tool (NOT `grep` / `rg`).',
     '- Edit files → Edit / Write tools (NOT `sed` / `awk` / `echo >`).',
     '',
-    'Required: `command`. Optional: `description` (one short active-voice phrase), `timeout` (milliseconds), `workdir` (run from a different directory — do NOT use `cd dir && cmd`).',
-    'When a command runs outside the session cwd, the result ends with a bracketed note such as `[Ran in /path …]` — that is the directory it ACTUALLY ran in. Trust the note over your memory; `workdir` lasts one command only, so pass it again each time.',
+    'Required: `command`. Optional: `description` (one short active-voice phrase), `timeout` (milliseconds).',
+    'When targeting another directory, put the absolute path in the command or use the CLI native location flag. Trust `[Ran in /path …]` notes over memory of earlier directory changes.',
     '',
     'Examples — good vs bad:',
-    '- Good: `git status` · Bad: `cd /repo && git status` (use `workdir: "/repo"` instead).',
+    '- Good: `git -C /repo status` · Bad: `cd /repo && git status`.',
+    '- Good: `npm --prefix /repo/app run build` · Good: `docker compose -f /repo/compose.yaml up -d`.',
     '- Good: `cat "path with spaces/file.txt"` · Bad: `cat path with spaces/file.txt` (the unquoted path is parsed as four args).',
     '- Good: `git add . && git commit -m "fix"` · Bad: `git add .\\ngit commit -m "fix"` (do not use newlines to separate commands; use `&&` to chain).',
     '- Good: `git commit -m "$(cat <<\'EOF\'\nMultiline\nmessage\nEOF\n)"` · Bad: passing a multi-line message via interpolated double-quoted string (variables and backticks expand).',
@@ -102,8 +104,8 @@ function buildPowerShellDescription(ctx: CompatShellDescriptionCtx): string {
     '- Search file contents → Grep tool (NOT `Select-String`).',
     '- Edit/write files → Edit / Write tools (NOT `Set-Content` / `Out-File`).',
     '',
-    'Required: `command`. Optional: `description`, `timeout` (milliseconds), `workdir` (run from a different directory — do NOT prefix with `Set-Location` / `cd`).',
-    'When a command runs outside the session cwd, the result ends with a bracketed note such as `[Ran in C:\\path …]` — that is the directory it ACTUALLY ran in. Trust the note over your memory; `workdir` lasts one command only, so pass it again each time.',
+    'Required: `command`. Optional: `description`, `timeout` (milliseconds).',
+    'When targeting another directory, put the absolute path in the command or use the CLI native location flag. Trust `[Ran in C:\\path …]` notes over memory of earlier directory changes.',
     '',
     'PowerShell syntax (re-read before each call):',
     editionNotes,
@@ -123,6 +125,7 @@ function buildPowerShellDescription(ctx: CompatShellDescriptionCtx): string {
     '',
     'Examples — good vs bad:',
     '- Good: `Get-ChildItem -LiteralPath "C:\\Path With Spaces"` · Bad: `Get-ChildItem -LiteralPath C:\\Path With Spaces` (path splits at the space).',
+    '- Good: `git -C "C:\\repo" status` · Good: `npm --prefix "C:\\repo\\app" run build`.',
     edition === 'core'
       ? '- Good: `npm install && npm test` · Bad: `npm install; npm test` (the `;` runs the second even on failure).'
       : '- Good: `npm install; if ($?) { npm test }` · Bad: `npm install && npm test` (`&&` is a parser error on 5.1).',

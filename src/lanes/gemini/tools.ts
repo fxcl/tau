@@ -273,10 +273,6 @@ export const GEMINI_TOOL_REGISTRY: LaneToolRegistration[] = [
           type: 'string',
           description: 'Brief description of the command for the user. Be specific and concise. Ideally a single sentence. Can be up to 3 sentences for clarity. No line breaks.',
         },
-        dir_path: {
-          type: 'string',
-          description: '(OPTIONAL) The path of the directory to run the command in. If not provided, the project root directory is used. Must be a directory within the workspace and must already exist.',
-        },
         is_background: {
           type: 'boolean',
           description: 'Set to true if this command should be run in the background (e.g. for long-running servers or watchers). The command will be started, allowed to run for a brief moment to check for immediate errors, and then moved to the background.',
@@ -290,11 +286,9 @@ export const GEMINI_TOOL_REGISTRY: LaneToolRegistration[] = [
       }
       if (native.description) result.description = native.description
       if (native.is_background) result.run_in_background = native.is_background
-      // dir_path → the shared Bash impl's first-class `workdir` (one-off,
-      // quoting-safe, never changes the session cwd). NOT a `cd <dir> &&`
-      // prefix, which breaks on spaces/Windows backslashes and silently
-      // persists the session cwd. `workdir` accepted too, in case the
-      // model echoes the name it sees in the shared shell guidance.
+      // Accept legacy directory keys from provider shims, but do not advertise
+      // them in the schema. New model calls should encode target paths in the
+      // command string with absolute paths or native CLI location flags.
       return applyShellWorkdir(result, native, ['dir_path', 'workdir'])
     },
     adaptOutput(output) {

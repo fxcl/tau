@@ -1,10 +1,11 @@
 /**
- * Cross-lane shell-workdir contract.
+ * Cross-lane shell directory compatibility contract.
  *
  * Every lane that hand-rolls its built-in shell tool schema must:
- *   1. advertise a directory parameter in the schema the model sees, and
- *   2. map that parameter to the shared Bash impl's `workdir` field —
- *      NEVER to a `cd <dir> && <command>` prefix.
+ *   1. avoid advertising a directory parameter in the schema the model sees,
+ *      so models use absolute paths or native CLI location flags, and
+ *   2. still map legacy directory keys to the shared Bash impl's internal
+ *      `workdir` field — NEVER to a `cd <dir> && <command>` prefix.
  *
  * This is the regression guard for the bug where codex's `shell` had no
  * directory param at all (the model looped on a wrong-cwd command) and
@@ -12,16 +13,14 @@
  * (quoting-fragile + persisted the session cwd).
  *
  * Lanes that forward the canonical Anthropic `input_schema` verbatim
- * (claude, openai-compat live path, kiro, qwen, cline, kilo) already
- * inherit `workdir` from BashTool/PowerShellTool and need no entry here.
+ * (claude, openai-compat live path, kiro, qwen, cline, kilo) already inherit
+ * the BashTool/PowerShellTool model-facing schema and need no entry here.
  *
  * Run:  bun run src/lanes/shared/shell_workdir.test.ts
  */
 
 import {
   applyShellWorkdir,
-  shellWorkdirSchemaProperty,
-  SHELL_WORKDIR_PARAM_DESCRIPTION,
 } from './shell_workdir.js'
 import {
   resolveToolCall as resolveCodexToolCall,
@@ -124,14 +123,7 @@ const CASES: ShellCase[] = [
 ]
 
 function main(): void {
-  console.log('shell-workdir helper:')
-
-  test('shellWorkdirSchemaProperty is a described string param', () => {
-    const prop = shellWorkdirSchemaProperty() as { type?: string; description?: string }
-    assert(prop.type === 'string', 'workdir must be a string')
-    assert(prop.description === SHELL_WORKDIR_PARAM_DESCRIPTION, 'uses shared description')
-    assert(/INSTEAD of `cd/.test(prop.description ?? ''), 'description steers off cd-prefix')
-  })
+  console.log('shell directory compatibility helper:')
 
   test('applyShellWorkdir maps every native key alias to workdir', () => {
     for (const key of ['workdir', 'dir_path', 'cwd', 'directory']) {
@@ -152,20 +144,20 @@ function main(): void {
     assert(applyShellWorkdir({ command: 'x' }, { cwd: 42 }).workdir === undefined, 'non-string → no workdir')
   })
 
-  console.log('\ncross-lane shell-workdir contract:')
+  console.log('\ncross-lane shell directory compatibility contract:')
 
   for (const c of CASES) {
     const label = `${c.lane}:${c.nativeName}`
 
-    test(`${label} advertises the '${c.dirKey}' directory param`, () => {
+    test(`${label} does not advertise the '${c.dirKey}' directory param`, () => {
       const props = c.schemaProps()
       assert(
-        Object.prototype.hasOwnProperty.call(props, c.dirKey),
-        `schema must expose '${c.dirKey}' so the model can pick a directory`,
+        !Object.prototype.hasOwnProperty.call(props, c.dirKey),
+        `schema must not expose '${c.dirKey}'; use absolute paths or native CLI location flags`,
       )
     })
 
-    test(`${label} maps ${c.dirKey} → workdir (no cd-prefix)`, () => {
+    test(`${label} maps legacy ${c.dirKey} → internal workdir (no cd-prefix)`, () => {
       const resolved = c.resolve({ command: 'run-me', [c.dirKey]: '/work/dir' })
       assert(resolved != null, 'tool call did not resolve')
       assert(resolved!.implId === 'Bash', `expected Bash impl, got ${resolved!.implId}`)

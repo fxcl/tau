@@ -24,7 +24,7 @@
  */
 
 import type { LaneToolRegistration } from '../types.js'
-import { applyShellWorkdir, shellWorkdirSchemaProperty } from '../shared/shell_workdir.js'
+import { applyShellWorkdir } from '../shared/shell_workdir.js'
 import { WEB_SEARCH_NATIVE_DESCRIPTION } from '../../tools/WebSearchTool/prompt.js'
 
 export const OPENAI_COMPAT_TOOL_REGISTRY: LaneToolRegistration[] = [
@@ -36,7 +36,6 @@ export const OPENAI_COMPAT_TOOL_REGISTRY: LaneToolRegistration[] = [
       type: 'object',
       properties: {
         command: { type: 'string', description: 'The shell command to execute.' },
-        workdir: shellWorkdirSchemaProperty(),
         description: { type: 'string', description: 'Brief description of what the command does.' },
       },
       required: ['command'],

@@ -77,7 +77,7 @@ export async function getPrompt(): Promise<string> {
 
   return `Executes a given PowerShell command with optional timeout. Working directory persists between commands; shell state (variables, functions) does not.
 
-Directory awareness: whenever a command runs anywhere other than the session cwd — or the session cwd moves or drifts from the project root — the result includes a bracketed note stating the directory it actually ran in. ALWAYS trust these notes over your memory of earlier directory changes, especially in long sessions. To run a command in another directory, pass the \`workdir\` parameter.
+Directory awareness: whenever a command runs anywhere other than the session cwd — or the session cwd moves or drifts from the project root — the result includes a bracketed note stating the directory it actually ran in. ALWAYS trust these notes over your memory of earlier directory changes, especially in long sessions. To target another directory, encode that absolute path in the command itself or use the command's native location flag.
 
 IMPORTANT: This tool is for terminal operations via PowerShell: git, npm, docker, and PS cmdlets. DO NOT use it for file operations (reading, writing, editing, searching, finding files) - use the specialized tools for this instead.
 
@@ -139,7 +139,7 @@ ${backgroundNote ? backgroundNote + '\n' : ''}\
     - If the commands depend on each other and must run sequentially, chain them in a single ${POWERSHELL_TOOL_NAME} call (see edition-specific chaining syntax above).
     - Use \`;\` only when you need to run commands sequentially but don't care if earlier commands fail.
     - DO NOT use newlines to separate commands (newlines are ok in quoted strings and here-strings)
-  - To run a command in a different directory, pass the \`workdir\` parameter. Do NOT prefix commands with \`cd\` or \`Set-Location\` — \`workdir\` avoids quoting issues and never mutates the session cwd.
+  - To target a different directory, put its absolute path directly in the command or use the command's native location flag (for example \`git -C <absolute-dir>\`, \`npm --prefix <absolute-dir>\`, \`docker compose -f <absolute-compose-file>\`, \`terraform -chdir=<absolute-dir>\`). Do not repeat a bare command from the wrong directory.
 ${sleepGuidance ? sleepGuidance + '\n' : ''}\
   - For git commands:
     - Prefer to create a new commit rather than amending an existing commit.

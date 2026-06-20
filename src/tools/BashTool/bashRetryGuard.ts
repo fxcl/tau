@@ -342,11 +342,10 @@ function buildDiagnosticSuggestions(command: string): string[] {
 
   // Wrong directory is the most common cause of these retry loops — the model
   // is usually sitting in another project's root. Lead with the concrete escape
-  // so it stops re-running the identical command: retry with an ABSOLUTE
-  // workdir. The guard keys on (workdir, command), so a new workdir is a
-  // genuinely different attempt and is NOT blocked.
+  // so it stops re-running the identical command: put the target's ABSOLUTE
+  // path in the command or use the CLI's native location flag.
   suggestions.push(
-    '- If this must run in a different directory than the current one (e.g. another project/repo), retry it with the `workdir` parameter set to that directory\'s ABSOLUTE path — do NOT `cd`, and do NOT repeat the identical command.',
+    '- If this must target a different directory than the current one (e.g. another project/repo), retry with that directory\'s ABSOLUTE path in the command or the CLI\'s native location flag — do NOT repeat the identical bare command.',
   )
 
   if (cdTarget) {

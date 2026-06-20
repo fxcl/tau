@@ -503,7 +503,7 @@ async function main(): Promise<void> {
       )
       assert(
         resolution.kind === 'auto' && resolution.workdir === composeStack,
-        'expected absolute workdir to be the Compose file directory',
+        'expected absolute Compose file directory',
       )
 
       const preflight = await validateBashExecutionPreflight(
@@ -848,6 +848,32 @@ async function main(): Promise<void> {
       assert(
         out === `(cd '/c/Workspace/TP1' && docker compose up)`,
         `expected subshell cd, got: ${out}`,
+      )
+    })
+
+    await test('anchorCommandToDir rewrites docker compose to an explicit compose file', async () => {
+      const dir = join(root, 'anchor-compose')
+      mkdirSync(dir, { recursive: true })
+      writeFileSync(join(dir, 'compose.yaml'), 'services: {}')
+      const out = anchorCommandToDir('docker compose up -d', dir, 'bash')
+      assert(out.includes('docker compose -f '), `expected compose -f rewrite, got: ${out}`)
+      assert(out.includes('compose.yaml'), `expected compose file path, got: ${out}`)
+      assert(!out.startsWith('(cd '), `must not hide compose behind cd wrapper, got: ${out}`)
+    })
+
+    await test('anchorCommandToDir rewrites npm package commands with --prefix', async () => {
+      const out = anchorCommandToDir('npm run build', '/workspace/app', 'bash', 'linux')
+      assert(
+        out === `npm --prefix '/workspace/app' run build`,
+        `expected npm --prefix rewrite, got: ${out}`,
+      )
+    })
+
+    await test('anchorCommandToDir rewrites terraform commands with -chdir', async () => {
+      const out = anchorCommandToDir('terraform plan', '/workspace/infra', 'bash', 'linux')
+      assert(
+        out === `terraform -chdir='/workspace/infra' plan`,
+        `expected terraform -chdir rewrite, got: ${out}`,
       )
     })
 

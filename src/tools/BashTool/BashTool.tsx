@@ -287,7 +287,7 @@ For commands that are harder to parse at a glance (piped commands, obscure flags
   syntax_confirmed: semanticBoolean(z.boolean().optional()).describe('Deprecated compatibility flag. It has no effect; normal commands execute directly after safety and permission checks.'),
   command_parts: bashCommandPartsSchema.optional().describe('Optional structured Bash command form. Tau compiles these parts into a safely quoted Bash command and blocks execution if command does not match the compiled result. Use this for complex external CLI syntax instead of hand-quoting raw Bash.'),
   dangerouslyDisableSandbox: semanticBoolean(z.boolean().optional()).describe('Set this to true to dangerously override sandbox mode and run commands without sandboxing.'),
-  workdir: z.string().optional().describe('Optional working directory to run this command in. Absolute, or relative to the current session cwd. Use this INSTEAD of `cd path && command` — it avoids path-quoting issues (especially on Windows where backslashes are escapes) and never changes the session cwd. Only affects this single invocation.'),
+  workdir: z.string().optional().describe('Deprecated internal/back-compat execution directory. The model-facing schema omits this field; encode target directories in the command with absolute paths or native CLI location flags.'),
   _simulatedSedEdit: z.object({
     filePath: z.string(),
     newContent: z.string()
@@ -295,8 +295,10 @@ For commands that are harder to parse at a glance (piped commands, obscure flags
   _workdirFromCd: z.boolean().optional().describe('Internal: set when a leading `cd <dir> &&` was converted into workdir, so the session cwd can persist like a real shell')
 }));
 
-// Always omit _simulatedSedEdit and _workdirFromCd from the model-facing schema.
-// They are internal-only fields: _simulatedSedEdit is set by SedEditPermissionRequest
+// Always omit workdir, _simulatedSedEdit and _workdirFromCd from the
+// model-facing schema. workdir is internal/back-compat only; the assistant must
+// put target directories in the command string itself with absolute paths or
+// native CLI location flags. _simulatedSedEdit is set by SedEditPermissionRequest
 // after the user approves a sed edit preview, and _workdirFromCd is set by
 // validateInput (bashWorkdir) when it converts a leading `cd X && …` into a workdir.
 // Exposing _simulatedSedEdit would let the model bypass permission checks and the
@@ -311,13 +313,16 @@ For commands that are harder to parse at a glance (piped commands, obscure flags
 // internal/unknown keys are dropped from the PARSED RESULT instead of rejected.
 // call() still reads `_workdirFromCd` off the original input object (not a parse
 // result), and `_simulatedSedEdit` stays omitted here AND stripped in toolExecution
-// (defense-in-depth) — so neither the workdir feature nor the sed-edit guard breaks.
+// (defense-in-depth) — so neither internal cwd compatibility nor the sed-edit
+// guard breaks.
 const inputSchema = lazySchema(() => {
   const omittedShape = (isBackgroundTasksDisabled ? fullInputSchema().omit({
     run_in_background: true,
+    workdir: true,
     _simulatedSedEdit: true,
     _workdirFromCd: true
   }) : fullInputSchema().omit({
+    workdir: true,
     _simulatedSedEdit: true,
     _workdirFromCd: true
   })).shape;
@@ -1070,7 +1075,7 @@ export const BashTool = buildTool({
       if (autoWorkdir) {
         cwdNote = `Auto-located ${autoWorkdirLabel} in ${executionDir} and ran it by absolute path (${cwdBeforeExec} had none; session cwd unchanged).`;
       } else if (!isSameBashCwd(executionDir, cwdAfter)) {
-        cwdNote = `Ran in ${executionDir} (one-off workdir). The session cwd is still ${cwdAfter}; pass workdir again to run the next command there.`;
+        cwdNote = `Ran in ${executionDir} for this command only. The session cwd is still ${cwdAfter}; use an absolute path or this command's native location flag for follow-up commands there.`;
       } else if (!isSameBashCwd(cwdAfter, cwdBeforeExec)) {
         cwdNote = `Shell cwd is now ${cwdAfter}`;
       } else if (isMainThread && !isSameBashCwd(cwdAfter, getOriginalCwd())) {

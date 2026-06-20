@@ -11,7 +11,7 @@
 
 import type { LaneToolRegistration } from '../types.js'
 import { parsePatch } from '../shared/apply_patch.js'
-import { applyShellWorkdir, shellWorkdirSchemaProperty } from '../shared/shell_workdir.js'
+import { applyShellWorkdir } from '../shared/shell_workdir.js'
 import { WEB_SEARCH_NATIVE_DESCRIPTION } from '../../tools/WebSearchTool/prompt.js'
 
 /**
@@ -43,11 +43,6 @@ export const CODEX_TOOL_REGISTRY: LaneToolRegistration[] = [
           type: 'string',
           description: 'The shell command to execute.',
         },
-        // codex-rs's native shell tool carries a `workdir`; exposing it
-        // here lets the model run from a subdirectory instead of looping
-        // on a wrong-cwd command. Maps to the shared Bash `workdir` field
-        // (one-off, quoting-safe) — never a `cd <dir> && …` prefix.
-        workdir: shellWorkdirSchemaProperty(),
       },
       required: ['command'],
     },
