@@ -5,6 +5,7 @@ import {
   listSnapshots,
   revertSnapshot,
   snapshotDiff,
+  snapshotDiffBetween,
   type SnapshotEntry,
   trackSnapshot,
 } from '../../services/snapshot/snapshot.js'
@@ -32,6 +33,12 @@ const inputSchema = lazySchema(() =>
       .optional()
       .describe(
         'Required for "diff" and "restore". Full or unambiguous prefix of a snapshot hash.',
+      ),
+    compareHash: z
+      .string()
+      .optional()
+      .describe(
+        'Optional second snapshot hash. When set with "diff", compares snapshot `hash` (base) against `compareHash` (target) instead of against the working tree.',
       ),
     label: z
       .string()
@@ -98,7 +105,7 @@ function filesToText(files: FileDiff[]): string {
   }
   const lines: string[] = []
   lines.push(
-    `${files.length} file${files.length === 1 ? '' : 's'} differ from the snapshot:`,
+    `${files.length} file${files.length === 1 ? '' : 's'} changed:`,
   )
   for (const f of files) {
     const stats = f.binary ? '(binary)' : `+${f.additions} -${f.deletions}`
@@ -160,7 +167,7 @@ export const SnapshotTool: Tool<InputSchema, Output> = buildTool({
   },
   toAutoClassifierInput(input) {
     if (input.action === 'restore' || input.action === 'diff') {
-      return `${input.action} ${input.hash ?? ''}`.trim()
+      return `${input.action} ${input.hash ?? ''} ${input.compareHash ?? ''}`.trim()
     }
     return input.action
   },
@@ -207,11 +214,17 @@ export const SnapshotTool: Tool<InputSchema, Output> = buildTool({
         }
       }
       case 'diff': {
-        const files = await snapshotDiff(cwd, input.hash ?? '')
+        const base = input.hash ?? ''
+        const files = input.compareHash
+          ? await snapshotDiffBetween(cwd, base, input.compareHash)
+          : await snapshotDiff(cwd, base)
+        const against = input.compareHash
+          ? `${base.slice(0, 8)} → ${input.compareHash.slice(0, 8)}`
+          : base.slice(0, 8)
         const summary =
           files.length === 0
-            ? `no changes vs ${(input.hash ?? '').slice(0, 8)}`
-            : `${files.length} file${files.length === 1 ? '' : 's'} differ from ${(input.hash ?? '').slice(0, 8)}`
+            ? `no changes (${against})`
+            : `${files.length} file${files.length === 1 ? '' : 's'} differ (${against})`
         return {
           data: {
             action: 'diff' as const,

@@ -174,6 +174,16 @@ type Theme = {
   deleteLine: Color
   deleteWord: Color
   deleteDecoration: Color
+  // In-place edits (a delete/add pair whose change is below CHANGE_THRESHOLD)
+  // render in this third "modified" hue instead of red+green, so a genuine
+  // edit reads differently from a wholesale add or delete.
+  modifyLine: Color
+  modifyWord: Color
+  modifyDecoration: Color
+  // Color-blind (daltonized) themes keep the two-hue red/blue add-delete
+  // scheme; a third hue would lower contrast for them, so they opt out and
+  // edits stay red/blue there.
+  modifyEnabled: boolean
   foreground: Color
   background: Color
   scopes: Record<string, Color>
@@ -293,6 +303,10 @@ function buildTheme(themeName: string, mode: ColorMode): Theme {
       deleteLine: DEFAULT_BG,
       deleteWord: DEFAULT_BG,
       deleteDecoration: ansiIdx(9),
+      modifyLine: DEFAULT_BG,
+      modifyWord: DEFAULT_BG,
+      modifyDecoration: ansiIdx(11),
+      modifyEnabled: true,
       foreground: ansiIdx(7),
       background: DEFAULT_BG,
       scopes: ANSI_SCOPES,
@@ -312,6 +326,10 @@ function buildTheme(themeName: string, mode: ColorMode): Theme {
         deleteLine,
         deleteWord,
         deleteDecoration,
+        modifyLine: deleteLine,
+        modifyWord: deleteWord,
+        modifyDecoration: deleteDecoration,
+        modifyEnabled: false,
         foreground: fg,
         background: DEFAULT_BG,
         scopes: MONOKAI_SCOPES,
@@ -324,6 +342,10 @@ function buildTheme(themeName: string, mode: ColorMode): Theme {
       deleteLine,
       deleteWord,
       deleteDecoration,
+      modifyLine: tc ? rgb(54, 47, 0) : ansiIdx(58),
+      modifyWord: tc ? rgb(94, 80, 0) : ansiIdx(100),
+      modifyDecoration: rgb(214, 184, 74),
+      modifyEnabled: true,
       foreground: fg,
       background: DEFAULT_BG,
       scopes: MONOKAI_SCOPES,
@@ -343,6 +365,10 @@ function buildTheme(themeName: string, mode: ColorMode): Theme {
       deleteLine,
       deleteWord,
       deleteDecoration,
+      modifyLine: deleteLine,
+      modifyWord: deleteWord,
+      modifyDecoration: deleteDecoration,
+      modifyEnabled: false,
       foreground: fg,
       background: DEFAULT_BG,
       scopes: GITHUB_SCOPES,
@@ -355,6 +381,10 @@ function buildTheme(themeName: string, mode: ColorMode): Theme {
     deleteLine,
     deleteWord,
     deleteDecoration,
+    modifyLine: rgb(255, 247, 200),
+    modifyWord: rgb(255, 233, 148),
+    modifyDecoration: rgb(149, 110, 0),
+    modifyEnabled: true,
     foreground: fg,
     background: DEFAULT_BG,
     scopes: GITHUB_SCOPES,
@@ -365,7 +395,11 @@ function defaultStyle(theme: Theme): Style {
   return { foreground: theme.foreground, background: theme.background }
 }
 
-function lineBackground(marker: Marker, theme: Theme): Color {
+// `isModify` lines are one half of a sub-threshold edit pair (see render()).
+// When the theme opts in, they take the "modified" hue in place of the
+// per-marker red/green; context (' ') lines are never modified.
+function lineBackground(marker: Marker, theme: Theme, isModify = false): Color {
+  if (isModify && theme.modifyEnabled && marker !== ' ') return theme.modifyLine
   switch (marker) {
     case '+':
       return theme.addLine
@@ -376,7 +410,8 @@ function lineBackground(marker: Marker, theme: Theme): Color {
   }
 }
 
-function wordBackground(marker: Marker, theme: Theme): Color {
+function wordBackground(marker: Marker, theme: Theme, isModify = false): Color {
+  if (isModify && theme.modifyEnabled && marker !== ' ') return theme.modifyWord
   switch (marker) {
     case '+':
       return theme.addWord
@@ -387,7 +422,13 @@ function wordBackground(marker: Marker, theme: Theme): Color {
   }
 }
 
-function decorationColor(marker: Marker, theme: Theme): Color {
+function decorationColor(
+  marker: Marker,
+  theme: Theme,
+  isModify = false,
+): Color {
+  if (isModify && theme.modifyEnabled && marker !== ' ')
+    return theme.modifyDecoration
   switch (marker) {
     case '+':
       return theme.addDecoration
@@ -643,6 +684,8 @@ type Highlight = {
   marker: Marker | null
   lineNumber: number
   lines: Block[][]
+  // True when this line is one half of an in-place edit pair (see render()).
+  isModify: boolean
 }
 
 function removeNewlines(h: Highlight): void {
@@ -712,7 +755,7 @@ function wrapText(h: Highlight, width: number, theme: Theme): void {
 
   // Pad changed lines so background extends to edge
   if (h.marker && h.marker !== ' ') {
-    const bg = lineBackground(h.marker, theme)
+    const bg = lineBackground(h.marker, theme, h.isModify)
     const padStyle: Style = { foreground: theme.foreground, background: bg }
     for (const line of h.lines) {
       const curW = line.reduce((s, [, t]) => s + stringWidth(t), 0)
@@ -730,8 +773,12 @@ function addLineNumber(
   fullDim: boolean,
 ): void {
   const style: Style = {
-    foreground: h.marker ? decorationColor(h.marker, theme) : theme.foreground,
-    background: h.marker ? lineBackground(h.marker, theme) : theme.background,
+    foreground: h.marker
+      ? decorationColor(h.marker, theme, h.isModify)
+      : theme.foreground,
+    background: h.marker
+      ? lineBackground(h.marker, theme, h.isModify)
+      : theme.background,
   }
   const shouldDim = h.marker === null || h.marker === ' '
   for (let i = 0; i < h.lines.length; i++) {
@@ -747,8 +794,8 @@ function addLineNumber(
 function addMarker(h: Highlight, theme: Theme): void {
   if (!h.marker) return
   const style: Style = {
-    foreground: decorationColor(h.marker, theme),
-    background: lineBackground(h.marker, theme),
+    foreground: decorationColor(h.marker, theme, h.isModify),
+    background: lineBackground(h.marker, theme, h.isModify),
   }
   for (const line of h.lines) {
     line.unshift([style, h.marker])
@@ -767,8 +814,8 @@ function dimContent(h: Highlight): void {
 
 function applyBackground(h: Highlight, theme: Theme, ranges: Range[]): void {
   if (!h.marker) return
-  const lineBg = lineBackground(h.marker, theme)
-  const wordBg = wordBackground(h.marker, theme)
+  const lineBg = lineBackground(h.marker, theme, h.isModify)
+  const wordBg = wordBackground(h.marker, theme, h.isModify)
 
   let rangeIdx = 0
   let byteOff = 0
@@ -896,6 +943,12 @@ export class ColorDiff {
 
     // Word-diff ranges (skip when dim — too loud)
     const ranges: Range[][] = entries.map(() => [])
+    // A delete/add pair that yields word-level ranges is a genuine in-place
+    // edit (changed < CHANGE_THRESHOLD): flag both halves so they render in
+    // the "modified" hue (yellow) instead of red+green. Pairs above the
+    // threshold get empty ranges from wordDiffStrings and stay a red delete +
+    // green add, which reads as a wholesale replacement.
+    const modifyFlags: boolean[] = entries.map(() => false)
     if (!dim) {
       const markers = entries.map(e => e.marker)
       for (const [delIdx, addIdx] of findAdjacentPairs(markers)) {
@@ -905,6 +958,10 @@ export class ColorDiff {
         )
         ranges[delIdx] = delR
         ranges[addIdx] = addR
+        if (delR.length > 0 || addR.length > 0) {
+          modifyFlags[delIdx] = true
+          modifyFlags[addIdx] = true
+        }
       }
     }
 
@@ -917,7 +974,12 @@ export class ColorDiff {
           ? [[defaultStyle(theme), code]]
           : highlightLine(hlState, code, theme)
 
-      const h: Highlight = { marker, lineNumber, lines: [tokens] }
+      const h: Highlight = {
+        marker,
+        lineNumber,
+        lines: [tokens],
+        isModify: modifyFlags[i]!,
+      }
       removeNewlines(h)
       applyBackground(h, theme, ranges[i]!)
       wrapText(h, effectiveWidth, theme)
@@ -957,7 +1019,12 @@ export class ColorFile {
     const out: string[] = []
     for (let i = 0; i < lines.length; i++) {
       const tokens = highlightLine(hlState, lines[i]!, theme)
-      const h: Highlight = { marker: null, lineNumber: i + 1, lines: [tokens] }
+      const h: Highlight = {
+        marker: null,
+        lineNumber: i + 1,
+        lines: [tokens],
+        isModify: false,
+      }
       removeNewlines(h)
       wrapText(h, effectiveWidth, theme)
       addLineNumber(h, theme, maxDigits, dim)

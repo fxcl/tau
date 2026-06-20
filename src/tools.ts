@@ -75,6 +75,7 @@ import { AFT_READ_ONLY_TOOLS } from './tools/AFTTool/AFTTools.js'
 import { NATIVE_READ_ONLY_TOOLS } from './tools/NativeTools/NativeTools.js'
 import { LSPTool } from './tools/LSPTool/LSPTool.js'
 import { SnapshotTool } from './tools/SnapshotTool/SnapshotTool.js'
+import { FileDiffTool } from './tools/FileDiffTool/FileDiffTool.js'
 import { PtyTool } from './tools/PtyTool/PtyTool.js'
 import { ListMcpResourcesTool } from './tools/ListMcpResourcesTool/ListMcpResourcesTool.js'
 import { ReadMcpResourceTool } from './tools/ReadMcpResourceTool/ReadMcpResourceTool.js'
@@ -228,6 +229,7 @@ export function getAllBaseTools(): Tools {
     ...(isEnvTruthy(process.env.ENABLE_LSP_TOOL) ? [LSPTool] : []),
     // SnapshotTool defaults ON. Opt out: TAU_SNAPSHOT_DISABLE=1.
     ...(isEnvTruthy(process.env.TAU_SNAPSHOT_DISABLE) ? [] : [SnapshotTool]),
+    FileDiffTool,
     // PtyTool defaults OFF — interactive TTY rendering is still rough.
     // Opt in: TAU_PTY_ENABLE=1. The tool also self-checks node-pty
     // availability in isEnabled() so it stays hidden where the optional

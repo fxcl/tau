@@ -13,12 +13,13 @@ When to use:
 Actions:
 - "save": Stage every modified/untracked file (files >2 MB are auto-excluded) and commit. Returns a snapshot hash. Optional \`label\` for a human-readable note (e.g., "before adding auth"). Always succeeds with a hash even if nothing changed.
 - "list": Return the most recent snapshots with hash, ISO timestamp, and label.
-- "diff": Return per-file differences between the CURRENT working tree and the snapshot. The result is an array of {file, status, binary, additions, deletions, patch}. A "+"-line in the patch is content currently in the working tree that the snapshot does NOT have — restoring would remove it. A "-"-line is content the snapshot has that the working tree lacks — restoring would bring it back. Use this to preview what "restore" would do.
+- "diff": Return per-file differences between the CURRENT working tree and the snapshot. The result is an array of {file, status, binary, additions, deletions, patch}. A "+"-line in the patch is content currently in the working tree that the snapshot does NOT have — restoring would remove it. A "-"-line is content the snapshot has that the working tree lacks — restoring would bring it back. Use this to preview what "restore" would do. Optionally pass \`compareHash\` to diff snapshot \`hash\` (base) against ANOTHER snapshot (target) instead of the working tree — e.g. to compare two saved snapshots without restoring either.
 - "restore": Atomically load the snapshot's tree into the working tree (via read-tree + checkout-index). Does NOT delete files that exist now but are absent from the snapshot — only overwrites files the snapshot contains.
 
 Inputs:
 - \`action\` (required): one of "save", "list", "diff", "restore".
 - \`hash\` (required for "diff" and "restore"): full or unambiguous prefix.
+- \`compareHash\` (optional, "diff" only): a second snapshot hash. Diffs \`hash\` (base) → \`compareHash\` (target) instead of comparing against the working tree.
 - \`label\` (optional, "save" only): short human-readable description.
 - \`limit\` (optional, "list" only): max entries (default 20, max 500).
 

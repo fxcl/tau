@@ -408,6 +408,133 @@ export async function listSnapshots(
     })
 }
 
+// Shared core for snapshotDiff (snapshot → working tree) and
+// snapshotDiffBetween (snapshot → snapshot). `diffRefs` is the ref(s) passed to
+// `git diff` (one ref = ref-vs-working-tree; two = base-vs-target). `baseRef`
+// sources the "before" side via `git show`; `getAfter` sources the "after".
+async function buildFileDiffs(
+  projectCwd: string,
+  shadowGitDir: string,
+  diffRefs: string[],
+  baseRef: string,
+  getAfter: (file: string) => Promise<string>,
+): Promise<FileDiff[]> {
+  const [statusRes, numstatRes] = await Promise.all([
+    gitRun(shadowGitDir, projectCwd, [
+      'diff',
+      '--name-status',
+      '--no-renames',
+      '-z',
+      ...diffRefs,
+      '--',
+      '.',
+    ]),
+    gitRun(shadowGitDir, projectCwd, [
+      'diff',
+      '--numstat',
+      '--no-renames',
+      '-z',
+      ...diffRefs,
+      '--',
+      '.',
+    ]),
+  ])
+  if (statusRes.code !== 0 || numstatRes.code !== 0) return []
+
+  // --name-status -z output: status\0file\0status\0file\0...
+  const statusMap = new Map<string, FileDiffStatus>()
+  const sParts = statusRes.stdout.split('\0').filter(p => p !== '')
+  for (let i = 0; i + 1 < sParts.length; i += 2) {
+    const code = sParts[i] ?? ''
+    const file = sParts[i + 1] ?? ''
+    if (!code || !file) continue
+    const first = code.charAt(0)
+    statusMap.set(
+      file,
+      first === 'A' ? 'added' : first === 'D' ? 'deleted' : 'modified',
+    )
+  }
+
+  // --numstat -z output: each entry is "additions\tdeletions\tfile" then \0
+  type Row = {
+    file: string
+    additions: number
+    deletions: number
+    binary: boolean
+  }
+  const rows: Row[] = []
+  for (const entry of numstatRes.stdout.split('\0')) {
+    if (!entry) continue
+    const parts = entry.split('\t')
+    if (parts.length < 3) continue
+    const adds = parts[0] ?? ''
+    const dels = parts[1] ?? ''
+    const file = parts.slice(2).join('\t')
+    if (!file) continue
+    const binary = adds === '-' && dels === '-'
+    rows.push({
+      file,
+      binary,
+      additions: binary ? 0 : Number.parseInt(adds, 10) || 0,
+      deletions: binary ? 0 : Number.parseInt(dels, 10) || 0,
+    })
+  }
+
+  // Fetch before/after concurrently per file.
+  return await Promise.all(
+    rows.map(async (row): Promise<FileDiff> => {
+      const status = statusMap.get(row.file) ?? 'modified'
+      if (row.binary) {
+        return {
+          file: row.file,
+          status,
+          binary: true,
+          additions: 0,
+          deletions: 0,
+          patch: '',
+        }
+      }
+      const [before, after] = await Promise.all([
+        status === 'added'
+          ? Promise.resolve('')
+          : gitRun(shadowGitDir, projectCwd, [
+              'show',
+              `${baseRef}:${row.file}`,
+            ]).then(r => (r.code === 0 ? r.stdout : '')),
+        status === 'deleted' ? Promise.resolve('') : getAfter(row.file),
+      ])
+      const total = before.length + after.length
+      if (total > PER_FILE_DIFF_BUDGET) {
+        return {
+          file: row.file,
+          status,
+          binary: false,
+          additions: row.additions,
+          deletions: row.deletions,
+          patch: `(diff elided: ${total} bytes exceeds per-file budget of ${PER_FILE_DIFF_BUDGET} bytes)`,
+          truncated: true,
+        }
+      }
+      let patch = ''
+      try {
+        patch = formatPatch(
+          structuredPatch(row.file, row.file, before, after, '', ''),
+        )
+      } catch (e) {
+        patch = `(diff failed: ${e instanceof Error ? e.message : String(e)})`
+      }
+      return {
+        file: row.file,
+        status,
+        binary: false,
+        additions: row.additions,
+        deletions: row.deletions,
+        patch,
+      }
+    }),
+  )
+}
+
 /**
  * Structured per-file diff between the snapshot and the current working
  * tree. The patch direction is snapshot → working tree, so `+` lines are
@@ -436,121 +563,65 @@ export async function snapshotDiff(
     if (resolved.code !== 0) return []
     const fullHash = resolved.stdout.trim()
 
-    const [statusRes, numstatRes] = await Promise.all([
+    return await buildFileDiffs(
+      projectCwd,
+      shadowGitDir,
+      [fullHash],
+      fullHash,
+      file => readFile(join(projectCwd, file), 'utf8').catch(() => ''),
+    )
+  })
+}
+
+/**
+ * Structured per-file diff between two snapshots (base → target). `+` lines are
+ * what `target` adds over `base`; `-` lines what it removes. Same shape and
+ * budgets as {@link snapshotDiff}, but reads BOTH sides from the shadow repo so
+ * it never touches the working tree.
+ */
+export async function snapshotDiffBetween(
+  projectCwd: string,
+  baseHash: string,
+  targetHash: string,
+): Promise<FileDiff[]> {
+  const shadowGitDir = await ensureShadowRepo(projectCwd)
+  if (!shadowGitDir) return []
+  const base = baseHash.trim()
+  const target = targetHash.trim()
+  if (
+    !/^[0-9a-fA-F]{4,64}$/.test(base) ||
+    !/^[0-9a-fA-F]{4,64}$/.test(target)
+  ) {
+    return []
+  }
+
+  return await withLock(shadowGitDir, async () => {
+    const [baseRes, targetRes] = await Promise.all([
       gitRun(shadowGitDir, projectCwd, [
-        'diff',
-        '--name-status',
-        '--no-renames',
-        '-z',
-        fullHash,
-        '--',
-        '.',
+        'rev-parse',
+        '--verify',
+        `${base}^{commit}`,
       ]),
       gitRun(shadowGitDir, projectCwd, [
-        'diff',
-        '--numstat',
-        '--no-renames',
-        '-z',
-        fullHash,
-        '--',
-        '.',
+        'rev-parse',
+        '--verify',
+        `${target}^{commit}`,
       ]),
     ])
-    if (statusRes.code !== 0 || numstatRes.code !== 0) return []
+    if (baseRes.code !== 0 || targetRes.code !== 0) return []
+    const baseFull = baseRes.stdout.trim()
+    const targetFull = targetRes.stdout.trim()
 
-    // --name-status -z output: status\0file\0status\0file\0...
-    const statusMap = new Map<string, FileDiffStatus>()
-    const sParts = statusRes.stdout.split('\0').filter(p => p !== '')
-    for (let i = 0; i + 1 < sParts.length; i += 2) {
-      const code = sParts[i] ?? ''
-      const file = sParts[i + 1] ?? ''
-      if (!code || !file) continue
-      const first = code.charAt(0)
-      statusMap.set(
-        file,
-        first === 'A' ? 'added' : first === 'D' ? 'deleted' : 'modified',
-      )
-    }
-
-    // --numstat -z output: each entry is "additions\tdeletions\tfile" followed by \0
-    type Row = {
-      file: string
-      additions: number
-      deletions: number
-      binary: boolean
-    }
-    const rows: Row[] = []
-    for (const entry of numstatRes.stdout.split('\0')) {
-      if (!entry) continue
-      const parts = entry.split('\t')
-      if (parts.length < 3) continue
-      const adds = parts[0] ?? ''
-      const dels = parts[1] ?? ''
-      const file = parts.slice(2).join('\t')
-      if (!file) continue
-      const binary = adds === '-' && dels === '-'
-      rows.push({
-        file,
-        binary,
-        additions: binary ? 0 : Number.parseInt(adds, 10) || 0,
-        deletions: binary ? 0 : Number.parseInt(dels, 10) || 0,
-      })
-    }
-
-    // Fetch before/after concurrently per file.
-    return await Promise.all(
-      rows.map(async (row): Promise<FileDiff> => {
-        const status = statusMap.get(row.file) ?? 'modified'
-        if (row.binary) {
-          return {
-            file: row.file,
-            status,
-            binary: true,
-            additions: 0,
-            deletions: 0,
-            patch: '',
-          }
-        }
-        const [before, after] = await Promise.all([
-          status === 'added'
-            ? Promise.resolve('')
-            : gitRun(shadowGitDir, projectCwd, [
-                'show',
-                `${fullHash}:${row.file}`,
-              ]).then(r => (r.code === 0 ? r.stdout : '')),
-          status === 'deleted'
-            ? Promise.resolve('')
-            : readFile(join(projectCwd, row.file), 'utf8').catch(() => ''),
-        ])
-        const total = before.length + after.length
-        if (total > PER_FILE_DIFF_BUDGET) {
-          return {
-            file: row.file,
-            status,
-            binary: false,
-            additions: row.additions,
-            deletions: row.deletions,
-            patch: `(diff elided: ${total} bytes exceeds per-file budget of ${PER_FILE_DIFF_BUDGET} bytes)`,
-            truncated: true,
-          }
-        }
-        let patch = ''
-        try {
-          patch = formatPatch(
-            structuredPatch(row.file, row.file, before, after, '', ''),
-          )
-        } catch (e) {
-          patch = `(diff failed: ${e instanceof Error ? e.message : String(e)})`
-        }
-        return {
-          file: row.file,
-          status,
-          binary: false,
-          additions: row.additions,
-          deletions: row.deletions,
-          patch,
-        }
-      }),
+    return await buildFileDiffs(
+      projectCwd,
+      shadowGitDir,
+      [baseFull, targetFull],
+      baseFull,
+      file =>
+        gitRun(shadowGitDir, projectCwd, [
+          'show',
+          `${targetFull}:${file}`,
+        ]).then(r => (r.code === 0 ? r.stdout : '')),
     )
   })
 }

@@ -1,9 +1,14 @@
+import { parsePatch, type StructuredPatchHunk } from 'diff'
 import * as React from 'react'
 
+import { StructuredDiff } from '../../components/StructuredDiff.js'
+import { useTerminalSize } from '../../hooks/useTerminalSize.js'
 import { Box, Text } from '../../ink.js'
 import type { Output } from './SnapshotTool.js'
 
-const TUI_MAX_FILES = 50
+// Render at most this many files' diffs inline; the rest are summarized. The
+// model still receives every file's patch via mapToolResultToToolResultBlockParam.
+const MAX_VISUAL_FILES = 6
 
 export function renderToolUseMessage(input: {
   action?: string
@@ -49,38 +54,68 @@ export function renderToolResultMessage(output: Output): React.ReactNode {
   if (output.action === 'diff') {
     const files = output.files ?? []
     if (files.length === 0) {
-      return (
-        <Text color="inactive">No differences vs the snapshot</Text>
-      )
+      return <Text color="inactive">No differences</Text>
     }
-    const shown = files.slice(0, TUI_MAX_FILES)
-    const hidden = files.length - shown.length
-    return (
-      <Box flexDirection="column">
-        <Text>
-          {files.length} file{files.length === 1 ? '' : 's'} differ from the
-          snapshot
-        </Text>
-        {shown.map(f => (
-          <Text key={f.file} color={statusColor(f.status)}>
-            {statusGlyph(f.status)}  {f.file}
-            {'  '}
-            {f.binary ? '(binary)' : `+${f.additions} -${f.deletions}`}
-            {f.truncated ? '  [diff elided]' : ''}
-          </Text>
-        ))}
-        {hidden > 0 ? (
-          <Text color="inactive">
-            ... {hidden} more file{hidden === 1 ? '' : 's'} not listed
-            (full per-file patches sent to the model).
-          </Text>
-        ) : (
-          <Text color="inactive">
-            (Full per-file patches sent to the model.)
-          </Text>
-        )}
-      </Box>
-    )
+    return <SnapshotDiffView files={files} />
   }
   return <Text color={output.ok ? 'success' : 'error'}>{output.summary}</Text>
+}
+
+/**
+ * Renders snapshot diffs visually: each file's hunks go through
+ * {@link StructuredDiff} — the unified, syntax-highlighted (red/green/yellow)
+ * diff, sized to the terminal so it stays readable at any window width.
+ */
+function SnapshotDiffView({
+  files,
+}: {
+  files: NonNullable<Output['files']>
+}): React.ReactNode {
+  const { columns } = useTerminalSize()
+  const shown = files.slice(0, MAX_VISUAL_FILES)
+  const hidden = files.length - shown.length
+  return (
+    <Box flexDirection="column">
+      <Text>
+        {files.length} file{files.length === 1 ? '' : 's'} changed
+      </Text>
+      {shown.map(f => {
+        const renderable = !f.binary && !f.truncated && f.patch.trim() !== ''
+        let hunks: StructuredPatchHunk[] = []
+        if (renderable) {
+          try {
+            hunks = (parsePatch(f.patch)[0]?.hunks ?? []) as StructuredPatchHunk[]
+          } catch {
+            hunks = []
+          }
+        }
+        return (
+          <Box key={f.file} flexDirection="column" marginTop={1}>
+            <Text color={statusColor(f.status)}>
+              {statusGlyph(f.status)}  {f.file}
+              {'  '}
+              {f.binary ? '(binary)' : `+${f.additions} -${f.deletions}`}
+              {f.truncated ? '  [diff elided]' : ''}
+            </Text>
+            {hunks.map((h, i) => (
+              <StructuredDiff
+                key={i}
+                patch={h}
+                filePath={f.file}
+                firstLine={null}
+                dim={false}
+                width={Math.max(1, columns - 4)}
+              />
+            ))}
+          </Box>
+        )
+      })}
+      {hidden > 0 && (
+        <Text color="inactive">
+          … {hidden} more file{hidden === 1 ? '' : 's'} not shown (full patches
+          sent to the model).
+        </Text>
+      )}
+    </Box>
+  )
 }
