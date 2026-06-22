@@ -1,12 +1,11 @@
 # Supported Providers
 
-Tau ships **24 native provider adapters**. Each speaks the provider's API directly — there's no routing proxy, no translation middleware, no shared bottleneck. Full streaming, rate-limit handling, and automatic tool-schema sanitization are wired per provider.
+Tau ships **22 native provider adapters**. Each speaks the provider's API directly — there's no routing proxy, no translation middleware, no shared bottleneck. Full streaming, rate-limit handling, and automatic tool-schema sanitization are wired per provider.
 
 | Provider | Notes |
 |---|---|
 | Anthropic | No comment |
 | OpenAI | Best in class |
-| Google Gemini | Use your own account — some server configs block certain regions. Currently Gemini servers are throwing 429 in some regions; see [google-gemini/gemini-cli issues](https://github.com/google-gemini/gemini-cli/issues) |
 | Antigravity | Saving lives from agent server overload errors |
 | OpenRouter | Would use this full-time if the bills didn't care |
 | Vercel AI Gateway | OpenAI-compatible AI Gateway with saved API-key login, live model browsing, automatic cache controls, and usage checks |
@@ -24,7 +23,6 @@ Tau ships **24 native provider adapters**. Each speaks the provider's API direct
 | Ollama | Local and private, but you knew that already |
 | Cline | Moonshot AI's Kimi K2.6 through here is still the big win. Note: the old free tier is no longer fully free, but you still get some free credit |
 | GitHub Copilot | Recommended for enterprise plans; free models are also usable for lighter work |
-| Cursor | Peak performance on Plan mode |
 | KiloCode | Lots of free models and decent to try for low-cost side tasks |
 | Kiro | Best performance/cost provider with large free credit |
 | OpenCode Zen | deepseek-v4-flash unlimited usage |

@@ -152,7 +152,6 @@ export async function fetchAllProviderUsage(): Promise<ProviderUsageSnapshot> {
 const REPORTERS: Reporter[] = [
   reportAnthropic,
   reportOpenAI,
-  reportGemini,
   reportAntigravity,
   reportOpenRouter,
   reportVercel,
@@ -166,7 +165,6 @@ const REPORTERS: Reporter[] = [
   reportOllama,
   reportCline,
   reportCopilot,
-  reportCursor,
   reportKiloCode,
   reportKiro,
 ]

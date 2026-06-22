@@ -183,8 +183,8 @@ export const PROVIDER_DISPLAY_NAMES: Record<APIProvider, string> = {
 // APIProvider union, env detection, auth flow, transformer, and routing are
 // all kept intact for compatibility.
 export const SELECTABLE_PROVIDERS: readonly APIProvider[] = [
-  'firstParty', 'openai', 'commandcode', 'gemini', 'antigravity', 'openrouter', 'agentrouter', 'vercel', 'requesty', 'opencode', 'opencodego', 'fireworks', 'mistral', 'nim', 'deepseek', 'glm', 'moonshot', 'minimax', 'ollama', 'lmstudio',
-  'cline', 'copilot', 'cursor', 'kilocode', 'kiro',
+  'firstParty', 'openai', 'commandcode', 'antigravity', 'openrouter', 'agentrouter', 'vercel', 'requesty', 'opencode', 'opencodego', 'fireworks', 'mistral', 'nim', 'deepseek', 'glm', 'moonshot', 'minimax', 'ollama', 'lmstudio',
+  'cline', 'copilot', 'kilocode', 'kiro',
 ]
 
 /** Providers that use OpenAI-compatible chat completions API */

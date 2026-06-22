@@ -103,7 +103,6 @@ const MANAGEABLE_PROVIDERS = [
   'firstParty',
   'openai',
   'commandcode',
-  'gemini',
   'antigravity',
   'openrouter',
   'agentrouter',
@@ -125,7 +124,6 @@ const MANAGEABLE_PROVIDERS = [
   'cline',
   'copilot',
   'kiro',
-  'cursor',
 ] as const satisfies readonly APIProvider[]
 
 const MANAGEABLE_PROVIDER_ROWS = [

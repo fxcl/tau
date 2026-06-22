@@ -218,8 +218,6 @@ function getProviderAuthTypeLabel(provider: LoginTarget): string {
     return 'claude subscription / Console API / platform'
   }
   if (provider === 'antigravity') return 'Google login'
-  if (provider === 'gemini') return 'Google / API key'
-  if (provider === 'cursor') return 'Browser login'
 
   const supported = PROVIDER_AUTH_SUPPORT[provider] ?? ['api_key']
   const supportsOAuth = supported.includes('oauth')

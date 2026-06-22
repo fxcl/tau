@@ -147,11 +147,6 @@ function ModelsPickerWrapper({
   )
 }
 
-function isCursorProviderOnlyArgs(rawArgs: string): boolean {
-  const normalized = rawArgs.trim().toLowerCase()
-  return normalized === 'cursor' || normalized === 'cursor:'
-}
-
 async function showSearchResults(
   rawArgs: string,
   onDone: (result?: string, options?: { display?: CommandResultDisplay }) => void,
@@ -216,7 +211,6 @@ function showHelp(
     `  ${chalk.cyan('/models')}                    Pick a provider, then browse its models`,
     `  ${chalk.cyan('/models <query>')}            Search the active provider's models`,
     `  ${chalk.cyan('/models <provider>:<query>')} Search a specific provider`,
-    `  ${chalk.cyan('/models cursor')}             Browse Cursor models and variants`,
     `  ${chalk.cyan('/models <provider>')}         List models from one provider`,
     '',
     chalk.bold('Browsable Providers:'),
@@ -244,15 +238,6 @@ export const call: LocalJSXCommandCall = async (onDone, context, args) => {
   }
 
   if (trimmedArgs) {
-    if (isCursorProviderOnlyArgs(trimmedArgs)) {
-      return (
-        <ModelsPickerWrapper
-          onDone={onDone}
-          lockedProvider="cursor"
-          setMessages={context.setMessages}
-        />
-      )
-    }
     await showSearchResults(trimmedArgs, onDone)
     return
   }
