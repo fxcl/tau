@@ -48,7 +48,7 @@ export function initOpenAICompatLane(providers?: {
   if (dsKey) {
     openaiCompatLane.registerProvider(
       'deepseek', dsKey,
-      p.deepseek?.baseUrl ?? 'https://api.deepseek.com/v1',
+      p.deepseek?.baseUrl ?? process.env.DEEPSEEK_BASE_URL ?? 'https://api.deepseek.com/v1',
     )
   }
 

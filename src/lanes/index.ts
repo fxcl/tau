@@ -66,6 +66,7 @@ export function initLanes(opts?: {
   openaiBaseUrl?: string
   // DeepSeek
   deepseekApiKey?: string
+  deepseekBaseUrl?: string
   // GLM / BigModel
   glmApiKey?: string
   glmBaseUrl?: string
@@ -197,7 +198,7 @@ export function initLanes(opts?: {
   // ── OpenAI-compat lane (DeepSeek, GLM, Moonshot, Groq, Mistral,
   //    NIM, Ollama, OpenRouter, iFlow, KiloCode, Copilot) ──
   initOpenAICompatLane({
-    deepseek: opts?.deepseekApiKey ? { apiKey: opts.deepseekApiKey } : undefined,
+    deepseek: opts?.deepseekApiKey ? { apiKey: opts.deepseekApiKey, baseUrl: opts.deepseekBaseUrl } : undefined,
     glm: opts?.glmApiKey ? { apiKey: opts.glmApiKey, baseUrl: opts.glmBaseUrl } : undefined,
     moonshot: opts?.moonshotApiKey ? { apiKey: opts.moonshotApiKey, baseUrl: opts.moonshotBaseUrl } : undefined,
     minimax: opts?.minimaxApiKey ? { apiKey: opts.minimaxApiKey, baseUrl: opts.minimaxBaseUrl } : undefined,

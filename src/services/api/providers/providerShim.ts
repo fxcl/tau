@@ -115,6 +115,7 @@ function _ensureLanesInitialized(): void {
       openaiApiKey: getProviderApiKey('openai') ?? undefined,
       openaiBaseUrl: process.env.OPENAI_BASE_URL ?? getProviderBaseUrl('openai'),
       deepseekApiKey: getProviderApiKey('deepseek') ?? undefined,
+      deepseekBaseUrl: getProviderBaseUrl('deepseek'),
       glmApiKey: getProviderApiKey('glm') ?? undefined,
       glmBaseUrl: getProviderBaseUrl('glm'),
       moonshotApiKey: getProviderApiKey('moonshot') ?? undefined,

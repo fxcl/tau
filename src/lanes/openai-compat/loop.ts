@@ -357,6 +357,16 @@ export class OpenAICompatLane implements Lane {
 
     const provider = cfg.provider
     const isLocal = isLocalBaseUrl(cfg.baseUrl)
+    // A loopback base URL means one of two very different things:
+    //   • a bare/unknown local OpenAI server (provider 'generic') that may
+    //     not implement function-calling — keep the protective gate; or
+    //   • a first-class provider (deepseek, glm, …) pointed at a local dev
+    //     proxy via *_BASE_URL. That proxy forwards to the real upstream,
+    //     which fully supports tools + standard params, so it must NOT be
+    //     degraded. ollama/lmstudio are first-class local model servers too.
+    const isBareLocalServer = isLocal && provider === 'generic'
+    const isLocalModelServer =
+      isLocal && (provider === 'ollama' || provider === 'lmstudio' || provider === 'generic')
     const cacheSessionId = providerUsesStableRequestSession(provider)
       ? sessionId
       : undefined
@@ -446,13 +456,13 @@ export class OpenAICompatLane implements Lane {
         // on those gateways, which is what made every call look like a
         // cold miss even when the upstream actually had a cache hit.
         ...((provider === 'openrouter' || provider === 'agentrouter' || provider === 'opencode') && { usage: { include: true } }),
-        // Ollama and LM Studio expose local OpenAI-compatible tool calling.
-        // Keep generic localhost endpoints on the old gate unless they are
-        // explicitly selected as one of these local providers.
-        tools: openaiTools.length > 0 && (provider === 'ollama' || provider === 'lmstudio' || !isLocal) ? openaiTools : undefined,
-        tool_choice: openaiTools.length > 0 && (provider === 'ollama' || provider === 'lmstudio' || !isLocal) ? 'auto' : undefined,
+        // Only bare/unknown local servers get tools stripped (they may not
+        // implement function-calling). Named providers behind a local dev
+        // proxy — and ollama/lmstudio — keep full tool calling.
+        tools: openaiTools.length > 0 && !isBareLocalServer ? openaiTools : undefined,
+        tool_choice: openaiTools.length > 0 && !isBareLocalServer ? 'auto' : undefined,
         max_tokens: clampMaxTokens(provider, max_tokens),
-        temperature: temperature ?? (isLocal ? 0.7 : undefined),
+        temperature: temperature ?? (isLocalModelServer ? 0.7 : undefined),
         stop: stop_sequences?.length ? stop_sequences : undefined,
       },
       provider,
