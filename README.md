@@ -43,6 +43,9 @@ npm install -g @abdoknbgit/tau
 **Requirements:** Node.js >= 20.0.0, Git, Bash, `gh` for GitHub automation, and Go 1.25.8+ to build the optional native Tau helpers from source.
 
 If Go is missing, Tau still installs and runs. The native Markdown/code rendering and native read-only helper tools are skipped until Go is available or a package ships the matching prebuilt helper.
+*`web_search` tool need *
+Firecrawl provides 1k searches/month free for deep searching and its better than normal fetch tool. Just enter your API key through `/login` -> **Firecrawl Search**.
+
 
 ---
 
