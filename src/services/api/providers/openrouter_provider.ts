@@ -17,6 +17,7 @@ import {
   OPENROUTER_ALLOWLIST,
   type OpenRouterCatalogModel,
 } from '../../../utils/model/openrouterCatalog.js'
+import { resolveOpenRouterVirtualModelId } from '../../../utils/model/openrouterAliases.js'
 
 export class OpenRouterProvider extends OpenAIProvider {
   readonly name = 'openrouter'
@@ -45,8 +46,12 @@ export class OpenRouterProvider extends OpenAIProvider {
     return headers
   }
 
-  protected override cacheSessionKeyForModel(model: string): string {
-    return normalizeOpenRouterSessionId(`${this.cacheSessionKey}:${model.toLowerCase()}`)
+  protected override cacheSessionKeyForModel(_model: string): string {
+    return normalizeOpenRouterSessionId(this.cacheSessionKey)
+  }
+
+  override resolveModel(model: string): string {
+    return resolveOpenRouterVirtualModelId(super.resolveModel(model))
   }
 
   /**

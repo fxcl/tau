@@ -60,6 +60,10 @@ import {
   appendStrictParamsHint,
   GEMINI_TOOL_USAGE_RULES,
 } from '../shared/mcp_bridge.js'
+import {
+  resolveThinkingBudget as resolveGeminiThinkingBudget,
+  resolveThinkingConfig as resolveGeminiThinkingConfig,
+} from './thinking.js'
 
 // ─── Constants ───────────────────────────────────────────────────
 
@@ -174,7 +178,7 @@ export class GeminiLane implements Lane {
     }
 
     // Map thinkingBudget from Anthropic-format thinking param.
-    const thinkingBudget = resolveThinkingBudget(thinking)
+    const thinkingBudget = resolveGeminiThinkingBudget(thinking)
 
     // Try to place the stable portion of the request (system + tools) into
     // Google's cachedContents API. On a hit, the model sees cache_read
@@ -221,6 +225,7 @@ export class GeminiLane implements Lane {
       functionDeclarations,
       maxOutputTokens: max_tokens,
       thinkingBudget,
+      thinking,
       cacheName,
     })
     if (isAntigravityModel) {
@@ -901,70 +906,6 @@ export class GeminiLane implements Lane {
 
 // ─── Helpers ─────────────────────────────────────────────────────
 
-function resolveThinkingBudget(
-  thinking: LaneProviderCallParams['thinking'] | undefined,
-): number {
-  // -1 = dynamic (Gemini picks per-turn). 0 = off. positive integer = cap.
-  if (!thinking || thinking.type === 'adaptive') return -1
-  if (thinking.type === 'disabled') return 0
-  if (thinking.type === 'enabled') return thinking.budget_tokens ?? -1
-  return -1
-}
-
-/**
- * Build the right shape of `thinkingConfig` for the target model.
- *
- * Gemini 3.x Antigravity models advertise LEVEL-based thinking ("low",
- * "medium", "high") via the model registry — sending `thinkingBudget` on
- * them defaults to "high" thinking regardless of user intent, because the
- * server ignores the int and falls back to its model-default level. That
- * made `gemini-3.1-pro-low` just as slow as `-pro-high` (the root cause
- * of the "cancer latency" the user reported).
- *
- * Rule: when the model name has an explicit `-high` / `-low` / `-medium`
- * suffix (Antigravity convention), emit `thinkingLevel` in that level.
- * Otherwise, keep the legacy integer `thinkingBudget` path for 2.x models
- * and non-suffixed flash/lite variants.
- */
-function resolveThinkingConfig(
-  model: string,
-  thinkingBudget: number,
-): Record<string, unknown> {
-  const lower = model.toLowerCase()
-  // Match explicit suffix first — the suffix encodes the user's choice.
-  let level: 'low' | 'medium' | 'high' | null = null
-  const levelMatch = lower.match(/^gemini-\d+(?:\.\d+)?-(?:pro|flash)-(high|medium|low)$/)
-  if (levelMatch) level = levelMatch[1] as 'low' | 'medium' | 'high'
-  else if (/^gemini-3(?:\.\d+)?-flash$/.test(lower)) level = 'low' // Antigravity flash defaults to "low"
-
-  // Speed lever, Antigravity Gemini only: TAU_GEMINI_THINKING={low|medium|high
-  // |off} forces the reasoning level without switching models, so a -high
-  // model can be made snappy on the fly. Scoped by isAntigravityGeminiModel —
-  // Claude-on-Antigravity uses the legacy budget branch below and is untouched,
-  // and CLI Gemini is left alone. ("off" maps to the level path's floor,
-  // "low" — Gemini-3 always reasons a little; there is no true zero here.)
-  if (level && isAntigravityGeminiModel(model)) {
-    const override = process.env.TAU_GEMINI_THINKING?.toLowerCase()
-    if (override === 'low' || override === 'medium' || override === 'high') {
-      level = override
-    } else if (override === 'off' || override === 'none' || override === 'minimal') {
-      level = 'low'
-    }
-  }
-
-  if (level) {
-    return {
-      thinkingLevel: level,
-      includeThoughts: thinkingBudget !== 0,
-    }
-  }
-  // Legacy integer budget for 2.x, preview-flash-lite, etc.
-  return {
-    thinkingBudget,
-    includeThoughts: thinkingBudget !== 0,
-  }
-}
-
 /**
  * @deprecated Used by the lane-owns-loop `run()` scaffold only. The
  * real path (`streamAsProvider`) already receives a pre-assembled
@@ -1335,6 +1276,7 @@ interface GeminiRequestConfig {
   functionDeclarations: Array<{ name: string; description: string; parameters: Record<string, unknown> }>
   maxOutputTokens: number
   thinkingBudget: number
+  thinking?: LaneProviderCallParams['thinking']
   /** Server-side cache name from cachedContents API (if hit). */
   cacheName?: string | null
 }
@@ -1347,6 +1289,7 @@ function buildGeminiRequest(config: GeminiRequestConfig): Record<string, unknown
     functionDeclarations,
     maxOutputTokens,
     thinkingBudget,
+    thinking,
     cacheName,
   } = config
 
@@ -1370,7 +1313,7 @@ function buildGeminiRequest(config: GeminiRequestConfig): Record<string, unknown
   //   gemini-3.1-pro-low  → thinkingLevel: "low"
   //   gemini-3-flash      → thinkingLevel: "low"   (flash default)
   //   (other -flash, -lite preview, 2.5 family)   → thinkingBudget (legacy)
-  const thinkingConfig = resolveThinkingConfig(model, thinkingBudget)
+  const thinkingConfig = resolveGeminiThinkingConfig(model, thinkingBudget, thinking)
 
   const request: Record<string, unknown> = {
     model,

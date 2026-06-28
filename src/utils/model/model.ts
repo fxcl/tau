@@ -29,6 +29,7 @@ import { getProviderModelSet, isAgentRouterModelId } from './configs.js'
 import { LIGHTNING_BOLT } from '../../constants/figures.js'
 import { isModelAllowed } from './modelAllowlist.js'
 import { type ModelAlias, isModelAlias } from './aliases.js'
+import { shouldHonorSkillModelOverride } from './skillModel.js'
 import { capitalize } from '../stringUtils.js'
 
 export type ModelShortName = string
@@ -593,6 +594,8 @@ export function resolveSkillModelOverride(
   skillModel: string,
   currentModel: string,
 ): string {
+  if (!shouldHonorSkillModelOverride()) return currentModel
+
   if (has1mContext(skillModel) || !has1mContext(currentModel)) {
     return skillModel
   }

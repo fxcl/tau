@@ -56,7 +56,10 @@ import { parseFrontmatter } from '../../utils/frontmatterParser.js'
 import { lazySchema } from '../../utils/lazySchema.js'
 import { createUserMessage, normalizeMessages } from '../../utils/messages.js'
 import type { ModelAlias } from '../../utils/model/aliases.js'
-import { resolveSkillModelOverride } from '../../utils/model/model.js'
+import {
+  resolveSkillModelOverride,
+} from '../../utils/model/model.js'
+import { getRuntimeSkillModel } from '../../utils/model/skillModel.js'
 import { recordSkillUsage } from '../../utils/suggestions/skillUsageTracking.js'
 import { createAgentId } from '../../utils/uuid.js'
 import { runAgent } from '../AgentTool/runAgent.js'
@@ -213,6 +216,7 @@ async function executeForkedSkill(
 
   // Collect messages from the forked agent
   const agentMessages: Message[] = []
+  const skillModel = getRuntimeSkillModel(command.model)
 
   logForDebugging(
     `SkillTool executing forked skill ${commandName} with agent ${agentDefinition.agentType}`,
@@ -230,7 +234,7 @@ async function executeForkedSkill(
       canUseTool,
       isAsync: false,
       querySource: 'agent:custom',
-      model: command.model as ModelAlias | undefined,
+      model: skillModel as ModelAlias | undefined,
       availableTools: context.options.tools,
       override: { agentId },
     })) {
@@ -648,7 +652,7 @@ export const SkillTool: Tool<InputSchema, Output, Progress> = buildTool({
 
     // Extract metadata from the command
     const allowedTools = processedCommand.allowedTools || []
-    const model = processedCommand.model
+    const model = getRuntimeSkillModel(processedCommand.model)
     const effort = command?.type === 'prompt' ? command.effort : undefined
 
     const isBuiltIn = builtInCommandNames().has(commandName)

@@ -853,17 +853,21 @@ function main(): void {
       else process.env.OPENROUTER_CATEGORIES = oldCategories
     }
   })
-  test('openrouter cache-control mode is last-only for Claude models', () => {
-    assert(
-      TRANSFORMERS.openrouter.cacheControlMode('anthropic/claude-sonnet-4-6') === 'last-only',
-      'wanted last-only for Claude routing',
-    )
-  })
-  test('openrouter cache-control mode is none for non-Anthropic models', () => {
-    assert(
-      TRANSFORMERS.openrouter.cacheControlMode('meta-llama/llama-3.3-70b-instruct') === 'none',
-      'wanted none for Llama routing',
-    )
+  test('openrouter cache-control mode is last-only for all OpenRouter families', () => {
+    for (const model of [
+      'anthropic/claude-sonnet-4-6',
+      'meta-llama/llama-3.3-70b-instruct',
+      'qwen/qwen-3-coder-plus',
+      'moonshotai/kimi-k2.6',
+      'z-ai/glm-5.1',
+      'deepseek/deepseek-v4-flash',
+      'nvidia/nemotron-3-super-120b-a12b:free',
+    ]) {
+      assert(
+        TRANSFORMERS.openrouter.cacheControlMode(model) === 'last-only',
+        `wanted last-only for ${model}`,
+      )
+    }
   })
   test('openrouter stamps session id and enables context compression', () => {
     const body = mkBody('anthropic/claude-sonnet-4-6')
@@ -873,7 +877,7 @@ function main(): void {
       reasoningEffort: null,
       sessionId: 'session-fixed',
     })
-    const sessionKey = 'session-fixed:anthropic/claude-sonnet-4-6'
+    const sessionKey = 'session-fixed'
     assert(body.session_id === sessionKey, `session_id=${body.session_id}`)
     assert(body.prompt_cache_key === sessionKey, `prompt_cache_key=${body.prompt_cache_key}`)
     const headers = TRANSFORMERS.openrouter.buildHeaders?.('sk-or-v1-xxx', {
@@ -886,11 +890,18 @@ function main(): void {
       `plugins=${JSON.stringify(body.plugins)}`,
     )
   })
-  test('openrouter reuses free parent model for small-fast calls', () => {
-    assert(
-      TRANSFORMERS.openrouter.smallFastModel('nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free') === null,
-      'free OpenRouter models should not redirect side calls to Nemotron',
-    )
+  test('openrouter keeps small-fast calls on the selected model', () => {
+    for (const model of [
+      'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free',
+      'anthropic/claude-opus-4.7',
+      'openai/gpt-5.5',
+      'google/gemini-3.1-flash-lite-preview',
+    ]) {
+      assert(
+        TRANSFORMERS.openrouter.smallFastModel(model) === null,
+        `${model} should not redirect side calls to another OpenRouter model`,
+      )
+    }
   })
   test('openrouter can disable context compression by env', () => {
     const oldValue = process.env.CLAUDEX_OPENROUTER_CONTEXT_COMPRESSION

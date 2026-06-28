@@ -9,6 +9,7 @@ import {
 } from './model.js'
 import { getAPIProvider } from './providers.js'
 import { getForcedProvider } from '../forcedProvider.js'
+import { resolveAntigravityOpus46AgentModel } from './antigravityAgentModel.js'
 
 export const AGENT_MODEL_OPTIONS = [...MODEL_ALIASES, 'inherit'] as const
 export type AgentModelAlias = (typeof AGENT_MODEL_OPTIONS)[number]
@@ -70,6 +71,8 @@ export function getAgentModel(
   // contract enforced for forced providers in v0.9.3-v0.9.4: when the
   // caller declares the exact model, runtime sugar yields.
   if (toolSpecifiedModel) {
+    const scopedModel = resolveAntigravityOpus46AgentModel(toolSpecifiedModel, parentModel)
+    if (scopedModel) return scopedModel
     if (aliasMatchesParentTier(toolSpecifiedModel, parentModel)) {
       return parentModel
     }
@@ -83,10 +86,18 @@ export function getAgentModel(
   // model with whatever default this var holds, exactly the cross-binding
   // contamination we shipped v0.9.3-v0.9.4 to prevent.
   if (process.env.CLAUDE_CODE_SUBAGENT_MODEL && getForcedProvider() === undefined) {
+    const scopedModel = resolveAntigravityOpus46AgentModel(
+      process.env.CLAUDE_CODE_SUBAGENT_MODEL,
+      parentModel,
+    )
+    if (scopedModel) return scopedModel
     return parseUserSpecifiedModel(process.env.CLAUDE_CODE_SUBAGENT_MODEL)
   }
 
   const agentModelWithExp = agentModel ?? getDefaultSubagentModel()
+
+  const scopedModel = resolveAntigravityOpus46AgentModel(agentModelWithExp, parentModel)
+  if (scopedModel) return scopedModel
 
   if (agentModelWithExp === 'inherit') {
     // Apply runtime model resolution for inherit to get the effective model

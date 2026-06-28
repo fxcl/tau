@@ -6,7 +6,8 @@
 
 import { OpenAICompatLane } from './loop.js'
 import { LaneBackedProvider } from '../provider-bridge.js'
-import type { AnthropicStreamEvent, ProviderMessage } from '../../services/api/providers/base_provider.js'
+import type { AnthropicStreamEvent, ProviderMessage, ProviderTool } from '../../services/api/providers/base_provider.js'
+import { PROVIDER_CONFIGS } from '../../utils/model/configs.js'
 
 let passed = 0
 let failed = 0
@@ -320,14 +321,17 @@ async function captureFireworksRequest(
 async function captureOpenRouterRequestWithSessionId(
   cacheRetention?: string,
   usage: Record<string, any> = {
-    prompt_tokens: 100,
+    prompt_tokens: 120,
     completion_tokens: 7,
-    total_tokens: 107,
+    total_tokens: 127,
     prompt_tokens_details: {
       cached_tokens: 80,
       cache_write_tokens: 30,
     },
   },
+  model = 'meta-llama/llama-3.3-70b-instruct',
+  system: any = 'stable system prompt',
+  tools: ProviderTool[] = [],
 ): Promise<{
   request: CapturedRequest
   events: AnthropicStreamEvent[]
@@ -358,13 +362,13 @@ async function captureOpenRouterRequestWithSessionId(
       {
         id: 'chatcmpl-test',
         object: 'chat.completion.chunk',
-        model: 'meta-llama/llama-3.3-70b-instruct',
+        model: request.body.model,
         choices: [{ index: 0, delta: { content: 'ok' }, finish_reason: null }],
       },
       {
         id: 'chatcmpl-test',
         object: 'chat.completion.chunk',
-        model: 'meta-llama/llama-3.3-70b-instruct',
+        model: request.body.model,
         choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
         usage,
       },
@@ -378,10 +382,10 @@ async function captureOpenRouterRequestWithSessionId(
   try {
     const events: AnthropicStreamEvent[] = []
     const stream = lane.streamAsProvider({
-      model: 'meta-llama/llama-3.3-70b-instruct',
+      model,
       messages: [{ role: 'user', content: 'hello' }],
-      system: 'stable system prompt',
-      tools: [],
+      system,
+      tools,
       max_tokens: 128,
       signal: new AbortController().signal,
       sessionId: 'session-fixed',
@@ -696,7 +700,7 @@ async function main(): Promise<void> {
 
   await test('sends OpenRouter cache key without Copilot affinity headers', async () => {
     const { request } = await captureOpenRouterRequestWithSessionId()
-    const sessionKey = 'session-fixed:meta-llama/llama-3.3-70b-instruct'
+    const sessionKey = 'session-fixed'
     assert(request.body.session_id === sessionKey, `session_id=${request.body.session_id}`)
     assert(request.body.prompt_cache_key === sessionKey, `prompt_cache_key=${request.body.prompt_cache_key}`)
     assert(request.body.prompt_cache_retention === undefined,
@@ -709,17 +713,190 @@ async function main(): Promise<void> {
       `x-session-affinity=${request.headers['x-session-affinity']}`)
   })
 
+  await test('resolves OpenRouter free alias before request and stats model id', async () => {
+    const { request, events } = await captureOpenRouterRequestWithSessionId(
+      undefined,
+      undefined,
+      'openrouter/free',
+    )
+    const expected = PROVIDER_CONFIGS.openrouter.tiers.free.sonnet
+    assert(request.body.model === expected, `model=${request.body.model}`)
+    const messageStart = events.find((ev: any) => ev.type === 'message_start') as any
+    assert(messageStart?.message?.model === expected,
+      `message_start.model=${messageStart?.message?.model}`)
+  })
+
+  await test('openrouter moves volatile system tail behind the cacheable prefix', async () => {
+    const volatileSystem = [
+      'Stable Tau instructions that should remain cacheable.',
+      '# Environment',
+      'Working directory: C:\\Users\\ok\\Desktop\\claudex',
+      "Today's date is 2026-06-28.",
+      'Current branch: codex/cache-fix',
+    ].join('\n')
+    const { request } = await captureOpenRouterRequestWithSessionId(
+      undefined,
+      undefined,
+      'deepseek/deepseek-v4-flash',
+      volatileSystem,
+    )
+
+    const systemMessage = request.body.messages.find((m: any) => m.role === 'system')
+    const systemText = Array.isArray(systemMessage?.content)
+      ? systemMessage.content.map((part: any) => part?.text ?? '').join('\n')
+      : String(systemMessage?.content ?? '')
+    assert(systemText.includes('Stable Tau instructions'),
+      `system content=${JSON.stringify(systemMessage?.content)}`)
+    assert(!systemText.includes('Working directory:'),
+      `volatile context leaked into system prefix: ${JSON.stringify(systemMessage?.content)}`)
+
+    const dynamicMessage = request.body.messages.find((m: any) =>
+      Array.isArray(m.content) &&
+      m.content.some((part: any) =>
+        typeof part?.text === 'string' && part.text.includes('<dynamic_context>')),
+    )
+    assert(dynamicMessage !== undefined, `messages=${JSON.stringify(request.body.messages)}`)
+    assert(JSON.stringify(dynamicMessage).includes('Working directory:'),
+      `dynamic context=${JSON.stringify(dynamicMessage)}`)
+    assert(!JSON.stringify(dynamicMessage).includes('cache_control'),
+      `dynamic context must not be cache-stamped: ${JSON.stringify(dynamicMessage)}`)
+  })
+
+  await test('openrouter does not stamp cache_control on volatile context for explicit-cache rows', async () => {
+    const volatileSystem = [
+      'Stable cacheable instructions.',
+      '# Environment',
+      'Working directory: C:\\Users\\ok\\Desktop\\claudex',
+    ].join('\n')
+    const { request } = await captureOpenRouterRequestWithSessionId(
+      undefined,
+      undefined,
+      'qwen/qwen-3-coder-plus',
+      volatileSystem,
+    )
+
+    const dynamicMessage = request.body.messages.find((m: any) =>
+      Array.isArray(m.content) &&
+      m.content.some((part: any) =>
+        typeof part?.text === 'string' && part.text.includes('<dynamic_context>')),
+    )
+    assert(dynamicMessage !== undefined, `messages=${JSON.stringify(request.body.messages)}`)
+    assert(!JSON.stringify(dynamicMessage).includes('cache_control'),
+      `dynamic context must not be cache-stamped: ${JSON.stringify(dynamicMessage)}`)
+    const userMessages = request.body.messages.filter((m: any) => m.role === 'user')
+    const user = userMessages[userMessages.length - 1]
+    const lastUserPart = user?.content?.[user.content.length - 1]
+    assert(lastUserPart?.cache_control?.type === 'ephemeral',
+      `real trailing user missing cache_control: ${JSON.stringify(user)}`)
+  })
+
+  await test('openrouter stamps cache_control on every OpenRouter model family', async () => {
+    for (const model of [
+      'qwen/qwen-3-coder-plus',
+      'deepseek/deepseek-v4-flash',
+      'moonshotai/kimi-k2.6',
+      'z-ai/glm-5.1',
+      'nvidia/nemotron-3-super-120b-a12b:free',
+    ]) {
+      const { request } = await captureOpenRouterRequestWithSessionId(
+        undefined,
+        undefined,
+        model,
+      )
+      const sys = request.body.messages.find((m: any) => m.role === 'system')
+      assert(Array.isArray(sys?.content), `${model} system content not promoted: ${JSON.stringify(sys?.content)}`)
+      const lastSystemPart = sys.content[sys.content.length - 1]
+      assert(lastSystemPart?.cache_control?.type === 'ephemeral',
+        `${model} system last part missing cache_control: ${JSON.stringify(lastSystemPart)}`)
+      const user = request.body.messages.find((m: any) => m.role === 'user')
+      assert(Array.isArray(user?.content), `${model} user content not promoted: ${JSON.stringify(user?.content)}`)
+      const lastUserPart = user.content[user.content.length - 1]
+      assert(lastUserPart?.cache_control?.type === 'ephemeral',
+        `${model} user last part missing cache_control: ${JSON.stringify(lastUserPart)}`)
+    }
+  })
+
+  await test('openrouter keeps usage include flag for cache accounting', async () => {
+    const { request } = await captureOpenRouterRequestWithSessionId(
+      undefined,
+      undefined,
+      'deepseek/deepseek-v4-flash',
+    )
+    assert(request.body.usage?.include === true,
+      `usage.include=${JSON.stringify(request.body.usage)}`)
+    assert(request.body.stream_options?.include_usage === true,
+      `stream_options=${JSON.stringify(request.body.stream_options)}`)
+  })
+
+  await test('openrouter stamps one cache_control breakpoint on the final tool schema', async () => {
+    const tools: ProviderTool[] = [
+      {
+        name: 'Read',
+        description: 'Read a file from disk.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            file_path: { type: 'string' },
+          },
+          required: ['file_path'],
+          additionalProperties: false,
+        },
+      },
+      {
+        name: 'Grep',
+        description: 'Search files with a pattern.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            pattern: { type: 'string' },
+            path: { type: 'string' },
+          },
+          required: ['pattern'],
+          additionalProperties: false,
+        },
+      },
+    ]
+    const { request } = await captureOpenRouterRequestWithSessionId(
+      undefined,
+      undefined,
+      'deepseek/deepseek-v4-flash',
+      'stable system prompt',
+      tools,
+    )
+    assert(request.body.tools?.length === 2, `tools=${JSON.stringify(request.body.tools)}`)
+    assert(request.body.tools[0]?.cache_control === undefined,
+      `first tool should not spend a breakpoint: ${JSON.stringify(request.body.tools[0])}`)
+    assert(request.body.tools[1]?.cache_control?.type === 'ephemeral',
+      `last tool missing cache_control: ${JSON.stringify(request.body.tools[1])}`)
+  })
+
   await test('normalizes OpenRouter cache read and write usage', async () => {
     const { events } = await captureOpenRouterRequestWithSessionId()
     const usageDelta = events.find((ev: any) =>
       ev.type === 'message_delta' && ev.usage?.output_tokens === 7
     ) as any
     assert(usageDelta !== undefined, `events=${JSON.stringify(events)}`)
-    assert(usageDelta.usage.input_tokens === 20, `input_tokens=${usageDelta.usage.input_tokens}`)
-    assert(usageDelta.usage.cache_read_input_tokens === 50,
+    assert(usageDelta.usage.input_tokens === 10, `input_tokens=${usageDelta.usage.input_tokens}`)
+    assert(usageDelta.usage.cache_read_input_tokens === 80,
       `cache_read_input_tokens=${usageDelta.usage.cache_read_input_tokens}`)
     assert(usageDelta.usage.cache_creation_input_tokens === 30,
       `cache_creation_input_tokens=${usageDelta.usage.cache_creation_input_tokens}`)
+  })
+
+  await test('normalizes OpenRouter top-level cached_tokens usage', async () => {
+    const { events } = await captureOpenRouterRequestWithSessionId(undefined, {
+      prompt_tokens: 100,
+      completion_tokens: 7,
+      total_tokens: 107,
+      cached_tokens: 70,
+    })
+    const usageDelta = events.find((ev: any) =>
+      ev.type === 'message_delta' && ev.usage?.output_tokens === 7
+    ) as any
+    assert(usageDelta !== undefined, `events=${JSON.stringify(events)}`)
+    assert(usageDelta.usage.input_tokens === 30, `input_tokens=${usageDelta.usage.input_tokens}`)
+    assert(usageDelta.usage.cache_read_input_tokens === 70,
+      `cache_read_input_tokens=${usageDelta.usage.cache_read_input_tokens}`)
   })
 
   await test('normalizes OpenRouter explicit cache_read_tokens usage', async () => {
@@ -745,7 +922,7 @@ async function main(): Promise<void> {
 
   await test('can opt OpenRouter into long cache retention', async () => {
     const { request } = await captureOpenRouterRequestWithSessionId('long')
-    assert(request.body.prompt_cache_key === 'session-fixed:meta-llama/llama-3.3-70b-instruct', `prompt_cache_key=${request.body.prompt_cache_key}`)
+    assert(request.body.prompt_cache_key === 'session-fixed', `prompt_cache_key=${request.body.prompt_cache_key}`)
     assert(request.body.prompt_cache_retention === '24h',
       `prompt_cache_retention=${request.body.prompt_cache_retention}`)
   })

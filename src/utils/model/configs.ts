@@ -198,7 +198,12 @@ function isValidTier(t: string): t is ProviderTier {
 }
 
 function looksLikeFreeOpenRouterId(value: unknown): boolean {
-  return typeof value === 'string' && value.toLowerCase().endsWith(':free')
+  if (typeof value !== 'string') return false
+  const normalized = value.toLowerCase()
+  return normalized.endsWith(':free')
+    || normalized === 'openrouter/free'
+    || normalized.startsWith('openrouter/free/')
+    || normalized.startsWith('openrouter:free')
 }
 
 function hasOpencodeAccountKey(): boolean {

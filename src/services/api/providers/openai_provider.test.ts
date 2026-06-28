@@ -6,6 +6,7 @@
 
 import { OpenAIProvider } from './openai_provider.js'
 import { OpenRouterProvider } from './openrouter_provider.js'
+import { PROVIDER_CONFIGS } from '../../../utils/model/configs.js'
 
 let passed = 0
 let failed = 0
@@ -90,7 +91,7 @@ async function main(): Promise<void> {
         `prompt_cache_key=${capturedBody?.prompt_cache_key}`)
     })
 
-    await test('uses model-scoped OpenRouter session id in legacy provider', async () => {
+    await test('uses conversation-scoped OpenRouter session id in legacy provider', async () => {
       let capturedHeaders: Record<string, string> = {}
       let capturedBody: any = null
       globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
@@ -119,12 +120,43 @@ async function main(): Promise<void> {
         sessionId: 'tau-session-stable',
       })
 
-      const sessionKey = 'tau-session-stable:tencent/hy3-preview'
+      const sessionKey = 'tau-session-stable'
       assert(capturedBody?.session_id === sessionKey, `session_id=${capturedBody?.session_id}`)
       assert(capturedBody?.prompt_cache_key === sessionKey,
         `prompt_cache_key=${capturedBody?.prompt_cache_key}`)
       assert(capturedHeaders['x-session-id'] === sessionKey,
         `x-session-id=${capturedHeaders['x-session-id']}`)
+    })
+
+    await test('resolves OpenRouter free alias in legacy provider', async () => {
+      let capturedBody: any = null
+      globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+        capturedBody = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>
+        return new Response(JSON.stringify({
+          id: 'chatcmpl-test',
+          model: capturedBody.model,
+          choices: [{
+            message: { role: 'assistant', content: 'ok' },
+            finish_reason: 'stop',
+          }],
+          usage: {
+            prompt_tokens: 10,
+            completion_tokens: 2,
+            total_tokens: 12,
+          },
+        }), { status: 200 })
+      }) as unknown as typeof fetch
+
+      const provider = new OpenRouterProvider({ apiKey: 'sk-or-v1-test-key-1234567890' })
+      await provider.create({
+        model: 'openrouter/free',
+        messages: [{ role: 'user', content: 'hi' }],
+        max_tokens: 100,
+        sessionId: 'tau-session-stable',
+      })
+
+      const expected = PROVIDER_CONFIGS.openrouter.tiers.free.sonnet
+      assert(capturedBody?.model === expected, `model=${capturedBody?.model}`)
     })
   } finally {
     globalThis.fetch = originalFetch

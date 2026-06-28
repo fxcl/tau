@@ -33,6 +33,7 @@ import { logError } from '../log.js';
 import { enqueuePendingNotification } from '../messageQueueManager.js';
 import { createCommandInputMessage, createSyntheticUserCaveatMessage, createSystemMessage, createUserInterruptionMessage, createUserMessage, formatCommandInputTags, isCompactBoundaryMessage, isSystemLocalCommandMessage, normalizeMessages, prepareUserContent } from '../messages.js';
 import type { ModelAlias } from '../model/aliases.js';
+import { getRuntimeSkillModel } from '../model/skillModel.js';
 import { parseToolListFromCLI } from '../permissions/permissionSetup.js';
 import { hasPermissionsToUseTool } from '../permissions/permissions.js';
 import { isOfficialMarketplaceName, parsePluginIdentifier } from '../plugins/pluginIdentifier.js';
@@ -85,6 +86,7 @@ async function executeForkedSlashCommand(command: CommandBase & PromptCommand, a
     ...baseAgent,
     effort: command.effort
   } : baseAgent;
+  const skillModel = getRuntimeSkillModel(command.model);
   logForDebugging(`Executing forked slash command /${command.name} with agent ${agentDefinition.agentType}`);
 
   // Assistant mode: fire-and-forget. Launch subagent in background, return
@@ -157,7 +159,7 @@ async function executeForkedSlashCommand(command: CommandBase & PromptCommand, a
         canUseTool,
         isAsync: true,
         querySource: 'agent:custom',
-        model: command.model as ModelAlias | undefined,
+        model: skillModel as ModelAlias | undefined,
         availableTools: freshTools,
         override: {
           agentId
@@ -236,7 +238,7 @@ async function executeForkedSlashCommand(command: CommandBase & PromptCommand, a
       canUseTool,
       isAsync: false,
       querySource: 'agent:custom',
-      model: command.model as ModelAlias | undefined,
+      model: skillModel as ModelAlias | undefined,
       availableTools: context.options.tools
     })) {
       agentMessages.push(message);
@@ -835,6 +837,7 @@ async function getMessagesForPromptSlashCommand(command: CommandBase & PromptCom
   // subagents, letting workers fall through to getPromptForCommand and receive
   // the real skill content when they invoke the Skill tool.
   if (feature('COORDINATOR_MODE') && isEnvTruthy(process.env.CLAUDE_CODE_COORDINATOR_MODE) && !context.agentId) {
+    const effectiveCommandModel = getRuntimeSkillModel(command.model);
     const metadata = formatCommandLoadingMetadata(command, args);
     const parts: string[] = [`Skill "/${command.name}" is available for workers.`];
     if (command.description) {
@@ -861,7 +864,7 @@ async function getMessagesForPromptSlashCommand(command: CommandBase & PromptCom
         isMeta: true
       })],
       shouldQuery: true,
-      model: command.model,
+      model: effectiveCommandModel,
       effort: command.effort,
       command
     };
@@ -885,6 +888,7 @@ async function getMessagesForPromptSlashCommand(command: CommandBase & PromptCom
   addInvokedSkill(command.name, skillPath, skillContent, getAgentContext()?.agentId ?? null);
   const metadata = formatCommandLoadingMetadata(command, args);
   const additionalAllowedTools = parseToolListFromCLI(command.allowedTools ?? []);
+  const effectiveCommandModel = getRuntimeSkillModel(command.model);
 
   // Create content for the main message, including any pasted images
   const mainMessageContent: ContentBlockParam[] = imageContentBlocks.length > 0 || precedingInputBlocks.length > 0 ? [...imageContentBlocks, ...precedingInputBlocks, ...result] : result;
@@ -908,13 +912,13 @@ async function getMessagesForPromptSlashCommand(command: CommandBase & PromptCom
   }), ...attachmentMessages, createAttachmentMessage({
     type: 'command_permissions',
     allowedTools: additionalAllowedTools,
-    model: command.model
+    model: effectiveCommandModel
   })];
   return {
     messages,
     shouldQuery: true,
     allowedTools: additionalAllowedTools,
-    model: command.model,
+    model: effectiveCommandModel,
     effort: command.effort,
     command
   };

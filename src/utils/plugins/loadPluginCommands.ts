@@ -23,7 +23,7 @@ import {
   extractDescriptionFromMarkdown,
   parseSlashCommandToolsFromFrontmatter,
 } from '../markdownConfigLoader.js'
-import { parseUserSpecifiedModel } from '../model/model.js'
+import { resolveSkillFrontmatterModel } from '../model/skillModel.js'
 import { executeShellCommandsInPrompt } from '../promptShellExecution.js'
 import { loadAllPluginsCacheOnly } from './pluginLoader.js'
 import {
@@ -273,7 +273,7 @@ function createPluginCommand(
       frontmatter.model === 'inherit'
         ? undefined
         : frontmatter.model
-          ? parseUserSpecifiedModel(frontmatter.model as string)
+          ? resolveSkillFrontmatterModel(frontmatter.model as string)
           : undefined
 
     const effortRaw = frontmatter['effort']

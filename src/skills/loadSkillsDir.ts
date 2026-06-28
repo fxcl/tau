@@ -54,7 +54,8 @@ import {
   type MarkdownFile,
   parseSlashCommandToolsFromFrontmatter,
 } from '../utils/markdownConfigLoader.js'
-import { parseUserSpecifiedModel } from '../utils/model/model.js'
+import type { ModelName } from '../utils/model/model.js'
+import { resolveSkillFrontmatterModel } from '../utils/model/skillModel.js'
 import { executeShellCommandsInPrompt } from '../utils/promptShellExecution.js'
 import type { SettingSource } from '../utils/settings/constants.js'
 import { isSettingSourceEnabled } from '../utils/settings/constants.js'
@@ -196,7 +197,7 @@ export function parseSkillFrontmatterFields(
   argumentNames: string[]
   whenToUse: string | undefined
   version: string | undefined
-  model: ReturnType<typeof parseUserSpecifiedModel> | undefined
+  model: ModelName | undefined
   disableModelInvocation: boolean
   userInvocable: boolean
   hooks: HooksSettings | undefined
@@ -222,7 +223,7 @@ export function parseSkillFrontmatterFields(
     frontmatter.model === 'inherit'
       ? undefined
       : frontmatter.model
-        ? parseUserSpecifiedModel(frontmatter.model as string)
+        ? resolveSkillFrontmatterModel(frontmatter.model as string)
         : undefined
 
   const effortRaw = frontmatter['effort']

@@ -27,6 +27,7 @@ import {
   antigravityApiHeaders,
   codeAssistGenerationBasesForModel,
   clearCodeAssistCache,
+  isAntigravityGeminiModel,
   warmupCodeAssist,
 } from '../../services/api/providers/gemini_code_assist.js'
 import { resolveCliModelsForPicker } from '../../services/api/providers/gemini_provider.js'
@@ -170,6 +171,101 @@ export async function* parseGeminiApiSSE(
 // ─── API Client ──────────────────────────────────────────────────
 
 const AI_STUDIO_BASE = 'https://generativelanguage.googleapis.com/v1beta'
+const ANTIGRAVITY_GEMINI_ENDPOINT_TIMEOUT_MS = 6_000
+const ANTIGRAVITY_GEMINI_MAX_RETRY_ATTEMPTS = 2
+const ANTIGRAVITY_GEMINI_MAX_RETRY_WAIT_MS = 4_000
+
+class EndpointTimeoutError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'EndpointTimeoutError'
+  }
+}
+
+function isAntigravityGeminiRoute(executor: 'cli' | 'antigravity', model: string): boolean {
+  return executor === 'antigravity' && isAntigravityGeminiModel(model)
+}
+
+function antigravityGeminiEndpointTimeoutMs(): number {
+  const raw = process.env.TAU_ANTIGRAVITY_GEMINI_ENDPOINT_TIMEOUT_MS
+  if (raw) {
+    const n = Number.parseInt(raw, 10)
+    if (Number.isFinite(n) && n >= 0) return n
+  }
+  return ANTIGRAVITY_GEMINI_ENDPOINT_TIMEOUT_MS
+}
+
+function antigravityGeminiRetryOptions(
+  signal: AbortSignal | undefined,
+  enabled: boolean,
+): RetryOptions {
+  if (!enabled) return { signal }
+  return {
+    signal,
+    maxAttempts: ANTIGRAVITY_GEMINI_MAX_RETRY_ATTEMPTS,
+    initialDelayMs: 500,
+    maxDelayMs: 2_000,
+    maxRetryAfterMs: ANTIGRAVITY_GEMINI_MAX_RETRY_WAIT_MS,
+  }
+}
+
+function shouldTryNextAntigravityGeminiEndpoint(
+  executor: 'cli' | 'antigravity',
+  model: string,
+  status: number,
+  index: number,
+  total: number,
+): boolean {
+  if (!isAntigravityGeminiRoute(executor, model)) return false
+  if (index >= total - 1) return false
+  return status === 404 || status === 408 || status === 429 || status === 499 || status >= 500
+}
+
+async function fetchCodeAssistEndpoint(
+  url: string,
+  init: RequestInit,
+  opts: {
+    timeoutMs: number
+    signal?: AbortSignal
+  },
+): Promise<Response> {
+  if (opts.timeoutMs <= 0) {
+    return fetch(url, {
+      ...init,
+      signal: opts.signal ?? init.signal,
+    })
+  }
+
+  const controller = new AbortController()
+  const onAbort = (): void => controller.abort(opts.signal?.reason)
+  if (opts.signal) {
+    if (opts.signal.aborted) throw new DOMException('Aborted', 'AbortError')
+    opts.signal.addEventListener('abort', onAbort, { once: true })
+  }
+
+  let timedOut = false
+  const timer = setTimeout(() => {
+    timedOut = true
+    controller.abort()
+  }, opts.timeoutMs)
+
+  try {
+    return await fetch(url, {
+      ...init,
+      signal: controller.signal,
+    })
+  } catch (err) {
+    if (timedOut && !opts.signal?.aborted) {
+      throw new EndpointTimeoutError(
+        `Antigravity Gemini endpoint timed out after ${opts.timeoutMs}ms: ${url}`,
+      )
+    }
+    throw err
+  } finally {
+    clearTimeout(timer)
+    opts.signal?.removeEventListener('abort', onAbort)
+  }
+}
 
 class GeminiApiClient {
   private apiKey: string | null = null
@@ -433,18 +529,39 @@ class GeminiApiClient {
           let resp: Response | null = null
           let errText = ''
           const urls = urlsForExecutor(executor)
+          const fastAntigravityGemini = isAntigravityGeminiRoute(executor, model)
+          let lastEndpointError: unknown
           for (let i = 0; i < urls.length; i++) {
-            resp = await fetch(urls[i]!, {
-              method: 'POST',
-              headers,
-              body: serialized,
-              signal,
-            })
+            try {
+              resp = await fetchCodeAssistEndpoint(
+                urls[i]!,
+                {
+                  method: 'POST',
+                  headers,
+                  body: serialized,
+                },
+                {
+                  signal,
+                  timeoutMs: fastAntigravityGemini
+                    ? antigravityGeminiEndpointTimeoutMs()
+                    : 0,
+                },
+              )
+            } catch (err) {
+              if (signal?.aborted) throw err
+              lastEndpointError = err
+              if (fastAntigravityGemini && i < urls.length - 1) continue
+              throw err
+            }
             if (resp.ok) break
             errText = await resp.text().catch(() => '')
+            if (shouldTryNextAntigravityGeminiEndpoint(executor, model, resp.status, i, urls.length)) {
+              continue
+            }
             if (!(executor === 'antigravity' && resp.status === 404 && i < urls.length - 1)) break
           }
           if (!resp) {
+            if (lastEndpointError) throw lastEndpointError
             throw new GeminiApiError(0, 'No Code Assist endpoint attempted', undefined, {
               kind: 'non-retryable',
               details: {},
@@ -539,7 +656,10 @@ class GeminiApiClient {
 
           return resp
         },
-        { signal },
+        antigravityGeminiRetryOptions(
+          signal,
+          isAntigravityGeminiRoute(oauthRouting.executor, model),
+        ),
       )
 
       // Code Assist SSE frames are wrapped as `{ response: <chunk> }`.
@@ -651,18 +771,39 @@ class GeminiApiClient {
           let resp: Response | null = null
           let errText = ''
           const urls = urlsForExecutor(executor)
+          const fastAntigravityGemini = isAntigravityGeminiRoute(executor, model)
+          let lastEndpointError: unknown
           for (let i = 0; i < urls.length; i++) {
-            resp = await fetch(urls[i]!, {
-              method: 'POST',
-              headers,
-              body: serialized,
-              signal,
-            })
+            try {
+              resp = await fetchCodeAssistEndpoint(
+                urls[i]!,
+                {
+                  method: 'POST',
+                  headers,
+                  body: serialized,
+                },
+                {
+                  signal,
+                  timeoutMs: fastAntigravityGemini
+                    ? antigravityGeminiEndpointTimeoutMs()
+                    : 0,
+                },
+              )
+            } catch (err) {
+              if (signal?.aborted) throw err
+              lastEndpointError = err
+              if (fastAntigravityGemini && i < urls.length - 1) continue
+              throw err
+            }
             if (resp.ok) break
             errText = await resp.text().catch(() => '')
+            if (shouldTryNextAntigravityGeminiEndpoint(executor, model, resp.status, i, urls.length)) {
+              continue
+            }
             if (!(executor === 'antigravity' && resp.status === 404 && i < urls.length - 1)) break
           }
           if (!resp) {
+            if (lastEndpointError) throw lastEndpointError
             throw new GeminiApiError(0, 'No Code Assist endpoint attempted', undefined, {
               kind: 'non-retryable',
               details: {},
@@ -732,7 +873,10 @@ class GeminiApiClient {
 
           return resp.json()
         },
-        { signal },
+        antigravityGeminiRetryOptions(
+          signal,
+          isAntigravityGeminiRoute(oauthRouting.executor, model),
+        ),
       )
       return unwrapCodeAssistResponse(data) as GeminiStreamChunk
     }
@@ -967,6 +1111,14 @@ const DEFAULT_MAX_ATTEMPTS = 5
 const INITIAL_DELAY_MS = 2000
 const MAX_DELAY_MS = 30_000
 
+interface RetryOptions {
+  signal?: AbortSignal
+  maxAttempts?: number
+  initialDelayMs?: number
+  maxDelayMs?: number
+  maxRetryAfterMs?: number
+}
+
 const RETRYABLE_NETWORK_CODES = new Set([
   'ECONNRESET',
   'ETIMEDOUT',
@@ -996,6 +1148,7 @@ function getNetworkErrorCode(error: unknown): string | undefined {
 
 function isRetryableTransport(error: unknown): boolean {
   if (error instanceof GeminiApiError) return error.isRetryable
+  if (error instanceof EndpointTimeoutError) return true
   const code = getNetworkErrorCode(error)
   if (code && RETRYABLE_NETWORK_CODES.has(code)) return true
   if (error instanceof Error && error.message.toLowerCase().includes('fetch failed')) return true
@@ -1014,22 +1167,24 @@ function parseRetryAfter(value: string | null): number | undefined {
 
 async function retryWithBackoff<T>(
   fn: () => Promise<T>,
-  opts: { signal?: AbortSignal } = {},
+  opts: RetryOptions = {},
 ): Promise<T> {
   const { signal } = opts
   if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')
 
+  const maxAttempts = opts.maxAttempts ?? DEFAULT_MAX_ATTEMPTS
+  const maxDelay = opts.maxDelayMs ?? MAX_DELAY_MS
   let attempt = 0
-  let currentDelay = INITIAL_DELAY_MS
+  let currentDelay = opts.initialDelayMs ?? INITIAL_DELAY_MS
 
-  while (attempt < DEFAULT_MAX_ATTEMPTS) {
+  while (attempt < maxAttempts) {
     attempt++
     try {
       return await fn()
     } catch (err: any) {
       if (err?.name === 'AbortError' || signal?.aborted) throw err
 
-      if (!isRetryableTransport(err) || attempt >= DEFAULT_MAX_ATTEMPTS) throw err
+      if (!isRetryableTransport(err) || attempt >= maxAttempts) throw err
 
       // Server-specified Retry-After wins if present.
       const retryAfter = err instanceof GeminiApiError ? err.retryAfterMs : undefined
@@ -1042,8 +1197,12 @@ async function retryWithBackoff<T>(
         waitMs = Math.max(0, currentDelay + jitter)
       }
 
+      if (opts.maxRetryAfterMs !== undefined) {
+        waitMs = Math.min(waitMs, opts.maxRetryAfterMs)
+      }
+
       await delayWithAbort(waitMs, signal)
-      currentDelay = Math.min(MAX_DELAY_MS, currentDelay * 2)
+      currentDelay = Math.min(maxDelay, currentDelay * 2)
     }
   }
 

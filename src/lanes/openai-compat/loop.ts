@@ -6,7 +6,7 @@
  *   - Groq         (strip cache_control / $schema / null function_call; `reasoning` → thinking; fake_stream when JSON mode)
  *   - NVIDIA NIM   (strip stream_options; per-model param filtering)
  *   - Ollama       (no API key; Ollama-specific params; strip stream_options)
- *   - OpenRouter   (cache_control only for Claude / Gemini; relocate to last content block for 4-breakpoint Anthropic cap)
+ *   - OpenRouter   (session_id + broad message/tool cache_control breakpoints; volatile context kept out of cacheable prefix)
  *   - Mistral      (strip $id / $schema / additionalProperties / strict; tool_choice "required" → "any")
  *   - Generic long-tail (Fireworks, Together, Deepinfra, xAI, etc.)
  *
@@ -50,6 +50,7 @@ import {
   toOpenRouterModelInfo,
   type OpenRouterCatalogModel,
 } from '../../utils/model/openrouterCatalog.js'
+import { resolveOpenRouterVirtualModelId } from '../../utils/model/openrouterAliases.js'
 import { isMoonshotThinkingModel } from '../../utils/model/moonshotCatalog.js'
 import {
   getOpencodeEffort,
@@ -86,6 +87,8 @@ type ProviderType =
   | 'kilocode'
   | 'copilot'
   | 'generic'
+
+const OPENROUTER_VOLATILE_CONTEXT = Symbol('openrouter volatile context')
 
 function detectProvider(model: string, baseUrl: string): ProviderType {
   const b = baseUrl.toLowerCase()
@@ -143,6 +146,7 @@ interface OpenAIChatMessage {
   }>
   tool_call_id?: string
   name?: string
+  [OPENROUTER_VOLATILE_CONTEXT]?: true
   // OpenRouter / DeepSeek reasoning fields come back on the delta; no input field.
 }
 
@@ -151,7 +155,17 @@ interface OpenAIChatRequest {
   messages: OpenAIChatMessage[]
   stream?: boolean
   stream_options?: { include_usage?: boolean }
-  tools?: Array<{ type: 'function'; function: { name: string; description: string; parameters: Record<string, unknown> } }>
+  usage?: { include?: boolean; [key: string]: unknown }
+  tools?: Array<{
+    type: 'function'
+    cache_control?: { type: string }
+    function: {
+      name: string
+      description: string
+      parameters: Record<string, unknown>
+      strict?: boolean
+    }
+  }>
   tool_choice?: 'auto' | 'required' | 'none' | { type: 'function'; function: { name: string } }
   max_tokens?: number
   temperature?: number
@@ -359,7 +373,10 @@ export class OpenAICompatLane implements Lane {
   async *streamAsProvider(
     params: LaneProviderCallParams,
   ): AsyncGenerator<AnthropicStreamEvent, NormalizedUsage> {
-    const { model, messages, system, tools, max_tokens, thinking, temperature, stop_sequences, signal, sessionId, providerHint } = params
+    const { model: requestedModel, messages, system, tools, max_tokens, thinking, temperature, stop_sequences, signal, sessionId, providerHint } = params
+    const model = !providerHint || providerHint === 'openrouter'
+      ? resolveOpenRouterVirtualModelId(requestedModel)
+      : requestedModel
 
     const cfg = this.getConfigForModel(model, providerHint)
     if (!cfg) {
@@ -452,7 +469,9 @@ export class OpenAICompatLane implements Lane {
       : rawSystemText
 
     // History conversion → OpenAI Chat Completions messages.
-    const chatMessages = convertHistoryToOpenAI(messages, systemText, provider, model)
+    const chatMessages = provider === 'openrouter'
+      ? convertHistoryToOpenAIForOpenRouter(messages, systemText, model)
+      : convertHistoryToOpenAI(messages, systemText, provider, model)
 
     // Build request body with per-provider quirks applied.
     const body = applyProviderRequestQuirks(
@@ -670,7 +689,12 @@ export class OpenAICompatLane implements Lane {
             if (cacheUsage.read !== undefined) {
               reportedCachedInputTokens = cacheUsage.read + cacheWriteTokens
             } else if (cacheUsage.cachedTotal !== undefined) {
-              reportedCachedInputTokens = cacheUsage.cachedTotal
+              // OpenRouter documents `cached_tokens` as cache reads only,
+              // while this lane stores an internal read+write total so the
+              // final Anthropic-shaped usage can subtract write tokens once.
+              reportedCachedInputTokens = provider === 'openrouter'
+                ? cacheUsage.cachedTotal + cacheWriteTokens
+                : cacheUsage.cachedTotal
             }
             reasoningTokens = chunk.usage.completion_tokens_details?.reasoning_tokens ?? reasoningTokens
 
@@ -1066,7 +1090,7 @@ export class OpenAICompatLane implements Lane {
   }
 
   resolveModel(model: string): string {
-    return model
+    return resolveOpenRouterVirtualModelId(model)
   }
 
   smallFastModel(): string | null {
@@ -1780,6 +1804,8 @@ function extractOpenAICompatCacheUsage(
     details?.cachedTokens,
     usage.prompt_cache_hit_tokens,
     usage.promptCacheHitTokens,
+    provider === 'openrouter' ? usage.cached_tokens : undefined,
+    provider === 'openrouter' ? usage.cachedTokens : undefined,
     provider === 'moonshot' ? usage.cached_tokens : undefined,
   )
   return { read, write, cachedTotal }
@@ -2152,6 +2178,7 @@ function applyLastOnlyCacheBreakpoints(messages: OpenAIChatMessage[]): void {
   let stamped = 0
   for (let i = messages.length - 1; i >= 0 && stamped < 2; i--) {
     const m = messages[i]!
+    if (m[OPENROUTER_VOLATILE_CONTEXT]) continue
     if (m.role !== 'user' && m.role !== 'tool') continue
     stampTrailing(m)
     stamped++
@@ -2621,6 +2648,17 @@ function convertHistoryToOpenAI(
   return convertHistoryToOpenAIDefault(messages, systemText)
 }
 
+function convertHistoryToOpenAIForOpenRouter(
+  messages: ProviderMessage[],
+  systemText: string,
+  model: string,
+): OpenAIChatMessage[] {
+  const { stable, volatile } = splitOpenRouterSystemForCache(systemText)
+  const out = convertHistoryToOpenAI(messages, stable, 'openrouter', model)
+  if (volatile) insertOpenRouterVolatileContext(out, volatile)
+  return out
+}
+
 function opencodeThinkingActive(provider: ProviderType, model: string): boolean {
   if (!supportsOpencodeThinkingSelection(provider, model)) return false
   return getOpencodeEffort(model) !== 'default'
@@ -2691,6 +2729,79 @@ function convertHistoryToOpenAIDefault(
   }
 
   return out
+}
+
+const OPENROUTER_DYNAMIC_BOUNDARY = '__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__'
+
+const OPENROUTER_VOLATILE_SYSTEM_PATTERNS: readonly RegExp[] = [
+  /# Session-specific guidance\b[\s\S]*?(?=\n#|$)/,
+  /<env>[\s\S]*?<\/env>/,
+  /# Environment\b[\s\S]*?(?=\n#|$)/,
+  /# currentDate\n[^\n]+/,
+  /Today's date is [^\n]+/,
+  /# gitStatus\b[\s\S]*?(?=\n#|$)/,
+  /gitStatus:[\s\S]*?(?=\n\n|\n#|$)/,
+  /Current branch:[\s\S]*?(?=\n\n|\n#|$)/,
+  /Working directory:[\s\S]*?(?=\n\n|\n#|$)/,
+  /Primary working directory:[\s\S]*?(?=\n\n|\n#|$)/,
+]
+
+function splitOpenRouterSystemForCache(text: string): {
+  stable: string
+  volatile: string
+} {
+  if (!text) return { stable: '', volatile: '' }
+
+  const markerIdx = text.indexOf(OPENROUTER_DYNAMIC_BOUNDARY)
+  if (markerIdx >= 0) {
+    return {
+      stable: text.slice(0, markerIdx).replace(/\s+$/, ''),
+      volatile: text.slice(markerIdx + OPENROUTER_DYNAMIC_BOUNDARY.length).replace(/^\s+/, ''),
+    }
+  }
+
+  const cutoff = Math.floor(text.length * 0.3)
+  const matches: Array<{ start: number; end: number }> = []
+  for (const pattern of OPENROUTER_VOLATILE_SYSTEM_PATTERNS) {
+    const match = text.match(pattern)
+    if (match && match.index != null && match.index >= cutoff) {
+      matches.push({ start: match.index, end: match.index + match[0].length })
+    }
+  }
+  if (matches.length === 0) return { stable: text, volatile: '' }
+
+  matches.sort((a, b) => a.start - b.start)
+  const cut = matches[0]!.start
+  return {
+    stable: text.slice(0, cut).replace(/\s+$/, ''),
+    volatile: text.slice(cut).replace(/^\s+/, ''),
+  }
+}
+
+function insertOpenRouterVolatileContext(
+  messages: OpenAIChatMessage[],
+  volatileText: string,
+): void {
+  const text = volatileText.trim()
+  if (!text) return
+
+  const contextMessage: OpenAIChatMessage = {
+    role: 'user',
+    content: [
+      {
+        type: 'text',
+        text: `<dynamic_context>\n${text}\n</dynamic_context>`,
+      },
+    ],
+    [OPENROUTER_VOLATILE_CONTEXT]: true,
+  }
+
+  const last = messages[messages.length - 1]
+  if (last?.role === 'user') {
+    messages.splice(messages.length - 1, 0, contextMessage)
+  } else {
+    messages.push(contextMessage)
+  }
 }
 
 function convertHistoryToOpenAIForDeepSeek(

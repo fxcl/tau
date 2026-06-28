@@ -22,6 +22,10 @@ import {
   tokenCountWithEstimation,
 } from '../../utils/tokens.js'
 import { getAPIProvider } from '../../utils/model/providers.js'
+import {
+  modelUsageForStatisticsDisplay,
+} from './model_usage_display.js'
+import { isAntigravityGeminiModel } from '../../services/api/providers/gemini_code_assist.js'
 
 type LineStats = {
   added: number
@@ -102,7 +106,8 @@ function formatStatistics({
     growthTokens: number
   }
 }): string {
-  const totals = sumModelStats(modelStats)
+  const displayModelStats = modelStatsForStatisticsDisplay(modelStats)
+  const totals = sumModelStats(displayModelStats)
   const fileTotals = sumFileStats(fileStats)
   const conversationMessages = countConversationMessages(messages)
   const changedFiles = fileStats.length
@@ -224,6 +229,7 @@ function compactText(value: string, maxLength: number): string {
 }
 
 function modelUsageLine(name: string, usage: ModelStats): string {
+  usage = modelUsageForStatisticsDisplay(name, usage)
   const label = compactText(name, 38)
   if (!shouldShowDetailedCacheUsage(name, usage)) {
     return `${label}: input ${formatInteger(usage.inputTokens)} | output ${formatInteger(usage.outputTokens)} | cache ${formatCacheHit(usage)}`
@@ -246,6 +252,16 @@ function formatCacheHit(usage: ModelStats): string {
   }
   const percent = (cacheRead / cacheEligible) * 100
   return `${percent >= 10 ? percent.toFixed(0) : percent.toFixed(1)}%`
+}
+
+function modelStatsForStatisticsDisplay(
+  modelStats: Map<string, ModelStats>,
+): Map<string, ModelStats> {
+  const displayStats = new Map<string, ModelStats>()
+  for (const [model, usage] of modelStats.entries()) {
+    displayStats.set(model, modelUsageForStatisticsDisplay(model, usage))
+  }
+  return displayStats
 }
 
 function formatMetricValue(value: number | string): string {
@@ -287,6 +303,7 @@ function isNativeOpenAIUsageModel(model: string): boolean {
 function shouldShowDetailedCacheUsage(model: string, usage: ModelStats): boolean {
   if (!hasCacheUsage(usage)) return false
   return (
+    isAntigravityGeminiModel(model) ||
     isOpenRouterUsageModel(model) ||
     isGoogleGeminiUsageModel(model) ||
     isNativeOpenAIUsageModel(model)

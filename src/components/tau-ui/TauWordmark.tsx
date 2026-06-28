@@ -33,12 +33,16 @@ type Burst = {
 }
 
 const LETTERS = [
-  ['    ▄     ', '▀▀▀▀█▀▀▀▀ ', '    █____ ', '    ▀~~~~ '],
-  ['          ', '█▀▀▀▀▀▀▀█ ', '█^^^^^^^█ ', '▀~~~~~~~▀ '],
-  ['          ', '█       █ ', '█_______█ ', '▀~~~~~~~▀ '],
+  ['     ', '▀▀█▀▀', '  █_ ', '  ▀~ '],
+  ['     ', '█▀▀█ ', '█__█ ', '▀~~▀ '],
+  ['     ', '█  █ ', '█__█ ', '▀▀▀▀ '],
+  ['     ', '█▀▀▀ ', '█___ ', '▀▀▀▀ '],
+  ['     ', '█▀▀█ ', '█__█ ', '▀▀▀▀ '],
+  ['   ▄ ', '█▀▀█ ', '█__█ ', '▀▀▀▀ '],
+  ['     ', '█▀▀▀ ', '█^^^ ', '▀~~~ '],
 ] as const
 
-const LETTER_GAP = '  '
+const LETTER_GAP = ' '
 const FULL = Array.from({ length: 4 }, (_, y) =>
   LETTERS.map(letter => letter[y]).join(LETTER_GAP),
 )
@@ -60,14 +64,18 @@ const NEAR = [
   [1, -1],
 ] as const
 
-const BODY_LEFT: RGB = { r: 146, g: 146, b: 154 }
-const BODY_RIGHT: RGB = { r: 225, g: 225, b: 230 }
-const SHADOW: RGB = { r: 54, g: 54, b: 62 }
-const PRIMARY: RGB = { r: 82, g: 232, b: 221 }
+const BODY_LEFT: RGB = { r: 108, g: 108, b: 104 }
+const BODY_RIGHT: RGB = { r: 235, g: 235, b: 226 }
+const SHADOW: RGB = { r: 34, g: 35, b: 38 }
+const PRIMARY: RGB = { r: 244, g: 244, b: 236 }
 const PEAK: RGB = { r: 255, g: 255, b: 255 }
 
 const FRAME_MS = 40
 const IDLE_MS = 4600
+const IDLE_RINGS = 3
+const IDLE_WIDTH = 3.8
+const IDLE_TAIL = 9.5
+const IDLE_PHASE_OFFSET = 0.29
 const RIPPLE_MS = 1020
 const BLOOM_MS = 1600
 const MAX_BURSTS = 5
@@ -269,31 +277,37 @@ function idle(
   pixelY: number,
   time: number,
 ): { peak: number; primary: number } {
-  const originX = 3.6
-  const originY = ROWS * 2 + 4.4
-  const reach = SPAN + 10
+  const centerX = COLS / 2
+  const centerY = ROWS
+  const reach = SPAN + IDLE_TAIL
+  const dist = Math.hypot(x + 0.5 - centerX, pixelY + 0.5 - centerY)
   let peak = 0
   let primary = 0
 
-  for (let ring = 0; ring < 2; ring++) {
-    const phase = ((time / IDLE_MS + ring / 2) % 1 + 1) % 1
+  for (let ring = 0; ring < IDLE_RINGS; ring++) {
+    const phase =
+      ((time / IDLE_MS + ring / IDLE_RINGS - IDLE_PHASE_OFFSET) % 1 + 1) % 1
     const envelope = ease(Math.sin(phase * Math.PI))
-    const wobble =
-      (noise(x * 0.35, pixelY * 0.28, time * 0.00045) - 0.5) * 0.24
-    const dist =
-      Math.hypot(x + 0.5 - originX, pixelY + 0.5 - originY) + wobble
     const head = phase * reach
-    const core = gaussian(dist - head, 1.2) * envelope
-    const soft = gaussian(dist - head, 8.2) * envelope
-    const tail = dist < head ? Math.exp(-(head - dist) / 4.8) * envelope : 0
+    const delta = dist - head
+    const crest =
+      Math.abs(delta) < IDLE_WIDTH
+        ? 0.5 + 0.5 * Math.cos((delta / IDLE_WIDTH) * Math.PI)
+        : 0
+    const tail =
+      delta < 0 && delta > -IDLE_TAIL
+        ? (1 + delta / IDLE_TAIL) ** 2.3
+        : 0
 
-    peak += core * 0.52 + soft * 0.08
-    primary += soft * 0.24 + tail * 0.12
+    peak += crest * envelope * 0.26
+    primary += (crest * 0.24 + tail * 0.13) * envelope
   }
 
+  const breath = (0.5 + 0.5 * Math.sin(time * 0.0008)) * 0.035
+
   return {
-    peak: 0.04 + peak / 2,
-    primary: primary / 2,
+    peak: 0.035 + peak / IDLE_RINGS,
+    primary: breath + primary / IDLE_RINGS,
   }
 }
 
@@ -357,8 +371,8 @@ function burstEffect(
 }
 
 function tone(base: RGB, peak: number, primary: number): string {
-  const tinted = mix(base, PRIMARY, Math.min(0.74, primary))
-  return toRGBColor(mix(tinted, PEAK, Math.min(0.88, peak)))
+  const tinted = mix(base, PRIMARY, Math.min(0.54, primary))
+  return toRGBColor(mix(tinted, PEAK, Math.min(0.72, peak)))
 }
 
 function colorFor(

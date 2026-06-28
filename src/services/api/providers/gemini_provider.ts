@@ -49,7 +49,7 @@ import {
   wrapForGeminiCLI,
   geminiCLIApiHeaders,
   antigravityApiHeaders,
-  codeAssistGenerationBases,
+  codeAssistGenerationBasesForModel,
   clearCodeAssistCache,
 } from './gemini_code_assist.js'
 import { getOrCreateCache, invalidateCache } from './gemini_cache.js'
@@ -644,7 +644,7 @@ export class GeminiProvider extends BaseProvider {
       const ac = new AbortController()
       let response: Response | null = null
       let errText = ''
-      const urls = codeAssistGenerationBases(executor).map(base => `${base}:streamGenerateContent?alt=sse`)
+      const urls = codeAssistGenerationBasesForModel(executor, model).map(base => `${base}:streamGenerateContent?alt=sse`)
       for (let i = 0; i < urls.length; i++) {
         response = await fetch(urls[i]!, {
           method: 'POST',
@@ -754,7 +754,7 @@ export class GeminiProvider extends BaseProvider {
 
       let response: Response | null = null
       let errText = ''
-      const urls = codeAssistGenerationBases(executor).map(base => `${base}:generateContent`)
+      const urls = codeAssistGenerationBasesForModel(executor, model).map(base => `${base}:generateContent`)
       for (let i = 0; i < urls.length; i++) {
         response = await fetch(urls[i]!, {
           method: 'POST',

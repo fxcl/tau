@@ -3,9 +3,9 @@
  *
  * - Injects OpenRouter app-attribution headers so rankings credit Tau
  *   under the CLI agent category.
- * - cache_control is PASSED THROUGH for Anthropic/Gemini models (they
- *   natively support it); stripped for everything else so OpenRouter
- *   doesn't surface it as an unknown-field warning.
+ * - cache_control is PASSED THROUGH on OpenRouter broadly. OpenRouter's chat
+ *   schema accepts cache_control on content parts and function tools, and
+ *   drops/normalizes it for upstreams that do not use explicit breakpoints.
  * - Accepts `reasoning: { effort }` for reasoning-capable upstreams.
  * - Sends OpenRouter session affinity/cache fields when a stable session id is present.
  * - Enables OpenRouter context-compression by default so over-context prompts
@@ -44,13 +44,13 @@ export const openrouterTransformer: Transformer = {
       'X-OpenRouter-Title': title,
       'X-OpenRouter-Categories': categories,
       'X-Title': title,
-      ...(ctx?.sessionId ? { 'x-session-id': openRouterSessionKey(ctx.sessionId, ctx.model) } : {}),
+      ...(ctx?.sessionId ? { 'x-session-id': normalizeOpenRouterSessionId(ctx.sessionId) } : {}),
     }
   },
 
   transformRequest(body: OpenAIChatRequest, ctx: TransformContext): OpenAIChatRequest {
     if (ctx.sessionId) {
-      const sessionKey = openRouterSessionKey(ctx.sessionId, body.model)
+      const sessionKey = normalizeOpenRouterSessionId(ctx.sessionId)
       body.session_id = sessionKey
       const retention = resolveOpenRouterCacheRetention()
       if (retention !== 'none') {
@@ -59,6 +59,7 @@ export const openrouterTransformer: Transformer = {
       }
     }
 
+    applyOpenRouterToolCacheBreakpoint(body)
     applyOpenRouterContextCompressionPlugin(body)
 
     // Only emit the reasoning knob for models that actually support it.
@@ -131,34 +132,37 @@ export const openrouterTransformer: Transformer = {
   },
 
   smallFastModel(model: string): string | null {
-    const m = model.toLowerCase()
-    // Free-tier parent: reuse the selected model. Routing side queries to a
-    // different free model splits cache/session accounting and shows up as a
-    // giant cold-context bucket on that helper model.
-    if (m.endsWith(':free')) return null
-    if (m.startsWith('anthropic/')) return 'anthropic/claude-haiku-4-5'
-    if (m.startsWith('openai/')) return 'openai/gpt-4o-mini'
-    if (m.startsWith('google/')) return 'google/gemini-2.5-flash-lite'
-    if (m.startsWith('meta-llama/') || m.startsWith('meta/')) return 'meta-llama/llama-3.3-8b-instruct'
+    // OpenRouter sticky/cache routing is per account + model + session. Do
+    // not substitute helper/side-query traffic onto a different OpenRouter
+    // model: that splits cache stats and warms a separate provider cache.
+    void model
     return null
   },
 
   cacheControlMode(model: string): 'none' | 'passthrough' | 'last-only' {
-    // OpenRouter enforces Anthropic's 4-breakpoint cap by relocating
-    // cache_control to the last text block. For other underlying
-    // providers the field is silently ignored.
-    const m = model.toLowerCase()
-    if (m.includes('anthropic/') || m.includes('claude-')) return 'last-only'
-    if (m.includes('google/gemini')) return 'last-only'
-    return 'none'
+    // Keep this provider-scoped, not model-scoped: opencode applies
+    // OpenRouter cache-control provider options broadly, and OpenRouter's
+    // current schema accepts cache_control content parts generally. The lane
+    // still keeps volatile env/date/git context out of stamped messages.
+    void model
+    return 'last-only'
   },
 }
 
 type OpenRouterCacheRetention = 'none' | 'short' | 'long'
 type OpenRouterContextCompressionMode = 'enabled' | 'disabled'
 
-function openRouterSessionKey(sessionId: string, model: string): string {
-  return normalizeOpenRouterSessionId(`${sessionId}:${model.toLowerCase()}`)
+function applyOpenRouterToolCacheBreakpoint(body: OpenAIChatRequest): void {
+  if (!body.tools?.length) return
+
+  // A single marker on the final tool definition covers the stable tool
+  // schema prefix without spending one breakpoint per tool. Together with
+  // system + two rolling message markers this stays within Anthropic's
+  // four-breakpoint budget while helping OpenRouter tool-heavy turns.
+  const lastTool = body.tools[body.tools.length - 1]
+  if (lastTool && !lastTool.cache_control) {
+    lastTool.cache_control = { type: 'ephemeral' }
+  }
 }
 
 function normalizeOpenRouterSessionId(sessionId: string): string {

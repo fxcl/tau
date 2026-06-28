@@ -22,8 +22,10 @@ export interface OpenAIChatRequest {
   messages: OpenAIChatMessage[]
   stream?: boolean
   stream_options?: { include_usage?: boolean }
+  usage?: { include?: boolean; [key: string]: unknown }
   tools?: Array<{
     type: 'function'
+    cache_control?: { type: string }
     function: {
       name: string
       description: string
