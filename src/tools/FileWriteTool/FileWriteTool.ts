@@ -1,4 +1,5 @@
 import { dirname, sep } from 'path'
+import { pathToFileURL } from 'url'
 import { logEvent } from 'src/services/analytics/index.js'
 import { z } from 'zod/v4'
 import { getFeatureValue_CACHED_MAY_BE_STALE } from '../../services/analytics/growthbook.js'
@@ -311,7 +312,7 @@ export const FileWriteTool = buildTool({
     const lspManager = getLspServerManager()
     if (lspManager) {
       // Clear previously delivered diagnostics so new ones will be shown
-      clearDeliveredDiagnosticsForFile(`file://${fullFilePath}`)
+      clearDeliveredDiagnosticsForFile(pathToFileURL(fullFilePath).href)
       // didChange: Content has been modified
       lspManager.changeFile(fullFilePath, content).catch((err: Error) => {
         logForDebugging(

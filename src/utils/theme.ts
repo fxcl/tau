@@ -1,5 +1,6 @@
 import chalk, { Chalk } from 'chalk'
 import { env } from './env.js'
+import { applyPowerModeTheme } from './modeTheme.js'
 
 export type Theme = {
   autoAccept: string
@@ -899,7 +900,7 @@ const studioTheme: Theme = {
   backgroundMenu: 'rgb(30,30,30)',
 }
 
-export function getTheme(themeName: ThemeName): Theme {
+function getBaseTheme(themeName: ThemeName): Theme {
   switch (themeName) {
     case 'dark':
       return tauDarkTheme
@@ -918,6 +919,13 @@ export function getTheme(themeName: ThemeName): Theme {
     default:
       return tauDarkTheme
   }
+}
+
+export function getTheme(themeName: ThemeName): Theme {
+  // Power mode tints the accent slots (bronze in cheap, gold in full) and
+  // cross-fades them on /mode switches. Normal mode returns the base theme
+  // object unchanged (fast path — no allocation).
+  return applyPowerModeTheme(getBaseTheme(themeName), themeName)
 }
 
 // Create a chalk instance with 256-color level for Apple Terminal

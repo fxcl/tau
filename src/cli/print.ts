@@ -1486,6 +1486,7 @@ function runHeadlessStreaming(
         [...tools, ...sdkTools, ...dynamicMcpState.tools],
         assembledTools,
         appState.toolPermissionContext.mode,
+        appState.settings,
       ),
       'name',
     )

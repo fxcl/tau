@@ -1769,6 +1769,7 @@ export const PROVIDER_AUTH_SUPPORT: Record<string, ProviderAuthMethod[]> = {
   ollama:      ['api_key'],
   lmstudio:    ['api_key'],
   cline:       ['oauth'],
+  clinepass:   ['oauth'],
   copilot:     ['oauth'],
   cursor:      ['oauth'],
   iflow:       ['oauth'],
@@ -1863,6 +1864,7 @@ function _getApiKeyDirect(provider: APIProvider): string | null {
     case 'ollama':      return process.env.OLLAMA_API_KEY ?? _loadStoredKey('ollama') ?? 'ollama'
     case 'lmstudio':    return process.env.LMSTUDIO_API_KEY ?? _loadStoredKey('lmstudio') ?? 'lm-studio'
     case 'cline':       return null  // OAuth-only
+    case 'clinepass':   return null  // OAuth-only
     case 'copilot':     return null  // OAuth-only
     case 'cursor':      return null  // OAuth-only
     case 'iflow':       return null  // OAuth-only
@@ -1988,6 +1990,7 @@ export function getProviderBaseUrl(provider: APIProvider): string {
     case 'ollama':      return process.env.OLLAMA_BASE_URL ?? 'http://localhost:11434/v1'
     case 'lmstudio':    return normalizeLmStudioBaseUrl(process.env.LMSTUDIO_BASE_URL ?? process.env.LM_STUDIO_BASE_URL ?? _loadStoredKey('lmstudio_base_url') ?? 'http://localhost:1234/v1')
     case 'cline':       return process.env.CLINE_BASE_URL ?? 'https://api.cline.bot/v1'
+    case 'clinepass':   return process.env.CLINE_PASS_BASE_URL ?? process.env.CLINE_BASE_URL ?? 'https://api.cline.bot/v1'
     case 'copilot':     return 'https://api.githubcopilot.com'
     case 'cursor':      return 'https://api2.cursor.sh'
     case 'iflow':       return 'https://apis.iflow.cn/v1'
@@ -2025,7 +2028,10 @@ export function isUsingThirdPartyLLM(): boolean {
     isEnvTruthy(process.env.CLAUDE_CODE_USE_GLM) ||
     isEnvTruthy(process.env.CLAUDE_CODE_USE_MOONSHOT) ||
     isEnvTruthy(process.env.CLAUDE_CODE_USE_MINIMAX) ||
-    isEnvTruthy(process.env.CLAUDE_CODE_USE_LMSTUDIO)
+    isEnvTruthy(process.env.CLAUDE_CODE_USE_LMSTUDIO) ||
+    isEnvTruthy(process.env.CLAUDE_CODE_USE_CLINE_PASS) ||
+    isEnvTruthy(process.env.CLAUDE_CODE_USE_CLINEPASS) ||
+    isEnvTruthy(process.env.CLAUDE_CODE_USE_CLINE)
   )
 }
 
@@ -2134,6 +2140,7 @@ function _getApiKeyEnvName(provider: APIProvider): string {
     case 'ollama':      return 'OLLAMA_API_KEY'
     case 'lmstudio':    return 'LMSTUDIO_API_KEY'
     case 'cline':       return '(OAuth only — no API key)'
+    case 'clinepass':   return '(OAuth only — no API key)'
     case 'copilot':     return '(OAuth only — no API key)'
     case 'cursor':      return '(OAuth only — no API key)'
     case 'iflow':       return '(OAuth only — no API key)'

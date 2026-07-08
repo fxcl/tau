@@ -5,10 +5,13 @@
  */
 
 import {
+  ANTIGRAVITY_MODEL_IDS,
   ANTIGRAVITY_MODELS,
+  ANTIGRAVITY_PICKER_MODELS,
   codeAssistGenerationBases,
   executorForModel,
   getAntigravityModelDisplayName,
+  isAntigravityGeminiModel,
   parseCodeAssistSSE,
   resolveAntigravityWireModel,
   wrapForCodeAssist,
@@ -120,6 +123,26 @@ async function main(): Promise<void> {
     )
   })
 
+  await test('gemini-3-flash is hidden from the picker but stays routable', async () => {
+    // Hidden from selection: its channel commits the implicit cache slowly
+    // and misses replicas often (measured 64-71% vs 85-93% on 3.5/Claude).
+    assert(
+      !ANTIGRAVITY_PICKER_MODELS.some(model => model.id === 'gemini-3-flash'),
+      'gemini-3-flash must not appear in the model picker',
+    )
+    assert(
+      ANTIGRAVITY_PICKER_MODELS.some(model => model.id === 'gemini-3.5-flash-low'),
+      'picker must keep the healthy Antigravity models',
+    )
+    // Still fully routable for saved configs / explicit --model:
+    assert(ANTIGRAVITY_MODEL_IDS.has('gemini-3-flash'), 'gemini-3-flash must stay routable')
+    assert(executorForModel('gemini-3-flash') === 'antigravity', 'routing must be unchanged')
+    assert(
+      isAntigravityGeminiModel('gemini-3-flash'),
+      'cache discipline must still cover explicit gemini-3-flash use',
+    )
+  })
+
   await test('wraps Gemini 3.5 Flash variants with the Antigravity wire model', async () => {
     assert(
       resolveAntigravityWireModel('gemini-3.5-flash-medium') === 'gemini-3.5-flash-low',
@@ -182,12 +205,16 @@ async function main(): Promise<void> {
     const antigravityBases = codeAssistGenerationBases('antigravity')
     assert(antigravityBases.length === 3, `antigravity bases=${antigravityBases.length}`)
     assert(
-      antigravityBases[0] === 'https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal',
+      antigravityBases[0] === 'https://daily-cloudcode-pa.googleapis.com/v1internal',
       `primary Antigravity base=${antigravityBases[0]}`,
     )
     assert(
-      antigravityBases[2] === 'https://cloudcode-pa.googleapis.com/v1internal',
-      `fallback Antigravity base=${antigravityBases[2]}`,
+      antigravityBases[1] === 'https://cloudcode-pa.googleapis.com/v1internal',
+      `fallback Antigravity base=${antigravityBases[1]}`,
+    )
+    assert(
+      antigravityBases[2] === 'https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal',
+      `last Antigravity base=${antigravityBases[2]}`,
     )
     const cliBases = codeAssistGenerationBases('cli')
     assert(cliBases.length === 1, `cli bases=${cliBases.length}`)

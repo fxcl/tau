@@ -7,6 +7,7 @@ import { getIsNonInteractiveSession } from '../bootstrap/state.js'
 import { getCurrentWorktreeSession } from '../utils/worktree.js'
 import { getSessionStartDate } from './common.js'
 import { getInitialSettings } from '../utils/settings/settings.js'
+import { getPowerModeFromSettings } from '../utils/powerMode.js'
 import {
   AGENT_TOOL_NAME,
   VERIFICATION_AGENT_TYPE,
@@ -59,6 +60,7 @@ import { MERMAID_RENDER_TOOL_NAME } from '../tools/MermaidRenderTool/constants.j
 import { INTEGRATION_HUB_TOOL_NAME } from '../tools/IntegrationHubTool/constants.js'
 import { DEPLOY_PREVIEW_TOOL_NAME } from '../tools/DeployPreviewTool/constants.js'
 import { VISUAL_DESIGN_AUDIT_TOOL_NAME } from '../tools/VisualDesignAuditTool/constants.js'
+import { WEB_BROWSER_TOOL_NAME } from '../tools/WebBrowserTool/constants.js'
 import {
   EXPLORE_AGENT,
   EXPLORE_AGENT_MIN_QUERIES,
@@ -72,7 +74,7 @@ import { isEnvTruthy } from '../utils/envUtils.js'
 import { isReplModeEnabled } from '../tools/REPLTool/constants.js'
 import { feature } from 'bun:bundle'
 import { getFeatureValue_CACHED_MAY_BE_STALE } from 'src/services/analytics/growthbook.js'
-import { shouldUseGlobalCacheScope } from '../utils/betas.js'
+import { shouldEmitSystemPromptBoundary } from '../utils/betas.js'
 import { isForkSubagentEnabled } from '../tools/AgentTool/forkSubagent.js'
 import {
   systemPromptSection,
@@ -187,6 +189,10 @@ function getMcpInstructionsSection(
   mcpClients: MCPServerConnection[] | undefined,
 ): string | null {
   if (!mcpClients || mcpClients.length === 0) return null
+  // Cheap power mode hides MCP from the model entirely. Connections from an
+  // earlier mode may still be open (kept warm for switch-back), but their
+  // instructions must not reach the prompt.
+  if (getPowerModeFromSettings(getInitialSettings()) === 'cheap') return null
   return getMcpInstructions(mcpClients)
 }
 
@@ -312,6 +318,7 @@ function getUsingYourToolsSection(enabledTools: Set<string>): string {
   const hasCodebaseRetrievalTool = enabledTools.has(CODEBASE_RETRIEVAL_TOOL_NAME)
   const hasGitHistorySearchTool = enabledTools.has(GIT_HISTORY_SEARCH_TOOL_NAME)
   const hasInspectSiteTool = enabledTools.has(INSPECT_SITE_TOOL_NAME)
+  const hasWebBrowserTool = enabledTools.has(WEB_BROWSER_TOOL_NAME)
   const hasPackageManagerTool = enabledTools.has(PACKAGE_MANAGER_TOOL_NAME)
   const hasSpecQuestTool = enabledTools.has(SPEC_QUEST_TOOL_NAME)
   const hasMermaidRenderTool = enabledTools.has(MERMAID_RENDER_TOOL_NAME)
@@ -413,12 +420,16 @@ function getUsingYourToolsSection(enabledTools: Set<string>): string {
       : []),
     ...(hasTestSearchTool
       ? [
-          `When changing a source file or triaging a failing test, load ${TEST_SEARCH_TOOL_NAME} with ${TOOL_SEARCH_TOOL_NAME} to find likely source/test counterparts, then pair it with ${PROJECT_WORKFLOW_TOOL_NAME} or repo scripts for focused verification.`,
+          `When changing a source file or triaging a failing test, load ${TEST_SEARCH_TOOL_NAME} with ${TOOL_SEARCH_TOOL_NAME} to find likely source/test counterparts, then ${hasProjectWorkflowTool ? `pair it with ${PROJECT_WORKFLOW_TOOL_NAME} or repo scripts` : 'use repo scripts'} for focused verification.`,
         ]
       : []),
     ...(hasCodebaseRetrievalTool
       ? [
-          `For broad "where is this behavior / what should I change / how does this feature work" repo questions, load ${CODEBASE_RETRIEVAL_TOOL_NAME} with ${TOOL_SEARCH_TOOL_NAME} for intent-ranked files and snippets, then use ${LSP_TOOL_NAME}, ${GREP_TOOL_NAME}, and ${FILE_READ_TOOL_NAME} for exact evidence before editing.`,
+          `For broad "where is this behavior / what should I change / how does this feature work" repo questions, load ${CODEBASE_RETRIEVAL_TOOL_NAME} with ${TOOL_SEARCH_TOOL_NAME} for intent-ranked files and snippets, then use ${[
+            hasLspTool ? LSP_TOOL_NAME : null,
+            GREP_TOOL_NAME,
+            FILE_READ_TOOL_NAME,
+          ].filter(Boolean).join(', ')} for exact evidence before editing.`,
         ]
       : []),
     ...(hasGitHistorySearchTool
@@ -429,6 +440,11 @@ function getUsingYourToolsSection(enabledTools: Set<string>): string {
     ...(hasInspectSiteTool
       ? [
           `For local web-app verification, after starting a dev server, load ${INSPECT_SITE_TOOL_NAME} with ${TOOL_SEARCH_TOOL_NAME} to verify HTTP reachability, expected text, forms, and same-origin assets. Use real browser/Chrome/Playwright MCP tools when screenshots, console errors, clicks, tabs, or authenticated state matter.`,
+        ]
+      : []),
+    ...(hasWebBrowserTool
+      ? [
+          `For local HTML artifacts, load ${WEB_BROWSER_TOOL_NAME} with ${TOOL_SEARCH_TOOL_NAME} when you need a compact page snapshot. Pass the artifact tool's absolute path or canonical htmlUrl/fileUrl directly; do not construct relative file URLs like file://.tau/... yourself.`,
         ]
       : []),
     ...(hasPackageManagerTool
@@ -458,7 +474,7 @@ function getUsingYourToolsSection(enabledTools: Set<string>): string {
       : []),
     ...(hasVisualDesignAuditTool
       ? [
-          `For frontend/design changes, load ${VISUAL_DESIGN_AUDIT_TOOL_NAME} with ${TOOL_SEARCH_TOOL_NAME} to scan styling, assets, responsive signals, and visual verification needs; pair it with ${INSPECT_SITE_TOOL_NAME} or browser tools when the app can run.`,
+          `For frontend/design changes, load ${VISUAL_DESIGN_AUDIT_TOOL_NAME} with ${TOOL_SEARCH_TOOL_NAME} to scan styling, assets, responsive signals, and visual verification needs; pair it with ${hasInspectSiteTool ? `${INSPECT_SITE_TOOL_NAME} or ` : ''}browser tools when the app can run.`,
         ]
       : []),
     `Reserve using the ${BASH_TOOL_NAME} exclusively for system commands and terminal operations that require shell execution. If you are unsure and there is a relevant dedicated tool, default to using the dedicated tool and only fallback on using the ${BASH_TOOL_NAME} tool for these if it is absolutely necessary.`,
@@ -474,6 +490,32 @@ function getUsingYourToolsSection(enabledTools: Set<string>): string {
   ].filter(item => item !== null)
 
   return [`# Using your tools`, ...prependBullets(items)].join(`\n`)
+}
+
+/**
+ * Cheap power mode strips the optional prebuilt tools, subagents, skills,
+ * plugins, and MCP — but KEEPS a fixed core (CHEAP_MODE_CORE_TOOL_NAME_SET),
+ * including the specialized-but-core tools models most often second-guess:
+ * notebook editing, plan mode, and snapshots. Those reach the model in its
+ * tool list exactly like any other tool, but on the native lanes (codex/Gemini)
+ * the core file/search tools are renamed to the provider's own vocabulary
+ * (Read→read_file, Edit→apply_patch, …), which leaves models unsure of the
+ * whole inventory and prone to telling the user a present tool is "unavailable
+ * in cheap mode". This section removes the guesswork: it states plainly what is
+ * OFF and affirms the core capabilities that remain ON. Capability-based (not
+ * tool-name-based) so it stays accurate whatever each lane names the tools.
+ * Cheap-mode-only and static, so it lives in the cached prefix and is rebuilt
+ * only when /mode clears the section cache.
+ */
+function getCheapModeToolsSection(): string | null {
+  if (getPowerModeFromSettings(getInitialSettings()) !== 'cheap') return null
+  return [
+    `# Power mode: cheap`,
+    ...prependBullets([
+      `This session runs a deliberately minimal toolset. Subagents / agent delegation, skills, plugins, and MCP servers are intentionally OFF — do not attempt to use them, and do not tell the user to enable them.`,
+      `Your full core toolset is still available: reading, writing, and editing files (including Jupyter notebooks), running shell commands, searching files and their contents, managing your task list, entering and exiting plan mode, saving and restoring working-tree snapshots, fetching web pages, and searching the web. These are present in the tool list you were given even though some are named in this provider's own vocabulary. Trust that list: use these capabilities when a task needs them, and never claim they are unavailable in cheap mode.`,
+    ]),
+  ].join(`\n`)
 }
 
 function getAgentToolSection(): string {
@@ -742,10 +784,15 @@ ${CYBER_RISK_INSTRUCTION}`,
       : null,
     getActionsSection(),
     getUsingYourToolsSection(enabledTools),
+    getCheapModeToolsSection(),
     getSimpleToneAndStyleSection(),
     getOutputEfficiencySection(),
     // === BOUNDARY MARKER - DO NOT MOVE OR REMOVE ===
-    ...(shouldUseGlobalCacheScope() ? [SYSTEM_PROMPT_DYNAMIC_BOUNDARY] : []),
+    // Separates cacheable static content (above) from per-turn dynamic content
+    // (below). Emitted for first-party global-scope caching AND for the native
+    // lanes that split on it (Gemini/Antigravity/OpenRouter) so their volatile
+    // context stays out of the cached prefix. See shouldEmitSystemPromptBoundary.
+    ...(shouldEmitSystemPromptBoundary() ? [SYSTEM_PROMPT_DYNAMIC_BOUNDARY] : []),
     // --- Dynamic content (registry-managed) ---
     ...resolvedDynamicSections,
   ].filter(s => s !== null)

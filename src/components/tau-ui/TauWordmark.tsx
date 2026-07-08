@@ -7,6 +7,13 @@ import {
   type ClickEvent,
   useAnimationFrame,
 } from '../../ink.js'
+import {
+  getPowerModeWordmarkPalette,
+  initializePowerModeTheme,
+  subscribePowerModeTheme,
+  type WordmarkPalette,
+} from '../../utils/modeTheme.js'
+import { getPowerModeFromSettings } from '../../utils/powerMode.js'
 import { getInitialSettings } from '../../utils/settings/settings.js'
 import { interpolateColor, toRGBColor } from '../Spinner/utils.js'
 
@@ -64,11 +71,9 @@ const NEAR = [
   [1, -1],
 ] as const
 
-const BODY_LEFT: RGB = { r: 108, g: 108, b: 104 }
-const BODY_RIGHT: RGB = { r: 235, g: 235, b: 226 }
-const SHADOW: RGB = { r: 34, g: 35, b: 38 }
-const PRIMARY: RGB = { r: 244, g: 244, b: 236 }
-const PEAK: RGB = { r: 255, g: 255, b: 255 }
+// Wordmark colors live in modeTheme.ts (getPowerModeWordmarkPalette): the
+// grey→white design in normal mode, soft bronze in cheap, soft gold in full.
+// Sampled every animation frame, so /mode cross-fades reach the logo too.
 
 const FRAME_MS = 40
 const IDLE_MS = 4600
@@ -268,8 +273,8 @@ function gaussian(value: number, width: number): number {
   return Math.exp(-((value / width) ** 2))
 }
 
-function baseInk(x: number): RGB {
-  return mix(BODY_LEFT, BODY_RIGHT, COLS > 1 ? x / (COLS - 1) : 1)
+function baseInk(palette: WordmarkPalette, x: number): RGB {
+  return mix(palette.bodyLeft, palette.bodyRight, COLS > 1 ? x / (COLS - 1) : 1)
 }
 
 function idle(
@@ -370,12 +375,18 @@ function burstEffect(
   return { peak, primary }
 }
 
-function tone(base: RGB, peak: number, primary: number): string {
-  const tinted = mix(base, PRIMARY, Math.min(0.54, primary))
-  return toRGBColor(mix(tinted, PEAK, Math.min(0.72, peak)))
+function tone(
+  palette: WordmarkPalette,
+  base: RGB,
+  peak: number,
+  primary: number,
+): string {
+  const tinted = mix(base, palette.primary, Math.min(0.54, primary))
+  return toRGBColor(mix(tinted, palette.peak, Math.min(0.72, peak)))
 }
 
 function colorFor(
+  palette: WordmarkPalette,
   base: RGB,
   x: number,
   pixelY: number,
@@ -390,6 +401,7 @@ function colorFor(
   const pulse = idle(x, pixelY, time)
   const burst = burstEffect(x, Math.floor(pixelY / 2), bursts, time)
   return tone(
+    palette,
     base,
     pulse.peak + burst.peak + extraPeak,
     pulse.primary + burst.primary + extraPrimary,
@@ -397,13 +409,27 @@ function colorFor(
 }
 
 export function TauWordmark(): React.ReactNode {
-  const [reducedMotion] = useState(
-    () => getInitialSettings().prefersReducedMotion ?? false,
-  )
+  const [reducedMotion] = useState(() => {
+    // Idempotent seed — covers standalone renders (e.g. welcome screens)
+    // that mount before/without the ThemeProvider doing it.
+    initializePowerModeTheme(getPowerModeFromSettings(getInitialSettings()))
+    return getInitialSettings().prefersReducedMotion ?? false
+  })
   const animatable = !reducedMotion
   const [ref, time] = useAnimationFrame(animatable ? FRAME_MS : null)
   const [buildStartedAt] = useState(() => (animatable && !launchPlayed ? time : null))
   const [bursts, setBursts] = useState<readonly Burst[]>([])
+
+  // Mode palette (grey / bronze / gold). When animating, the 40ms frame loop
+  // samples the in-flight /mode cross-fade each render, so the logo fades in
+  // sync with the rest of the UI. With reduced motion there is no frame loop:
+  // subscribe to mode changes and snap straight to the target palette.
+  const palette = getPowerModeWordmarkPalette({ snap: !animatable })
+  const [, bumpModeRepaint] = useState(0)
+  useEffect(() => {
+    if (animatable) return
+    return subscribePowerModeTheme(() => bumpModeRepaint(n => n + 1))
+  }, [animatable])
 
   const progress =
     buildStartedAt == null ? 1 : clamp((time - buildStartedAt) / BUILD_MS)
@@ -461,7 +487,8 @@ export function TauWordmark(): React.ReactNode {
     const extraPrimary = pop * 0.34
 
     const inkTop = colorFor(
-      baseInk(x),
+      palette,
+      baseInk(palette, x),
       x,
       y * 2,
       bursts,
@@ -471,7 +498,8 @@ export function TauWordmark(): React.ReactNode {
       extraPrimary,
     )
     const inkBottom = colorFor(
-      baseInk(x),
+      palette,
+      baseInk(palette, x),
       x,
       y * 2 + 1,
       bursts,
@@ -481,7 +509,8 @@ export function TauWordmark(): React.ReactNode {
       extraPrimary,
     )
     const shadowTop = colorFor(
-      SHADOW,
+      palette,
+      palette.shadow,
       x,
       y * 2,
       bursts,
@@ -491,7 +520,8 @@ export function TauWordmark(): React.ReactNode {
       extraPrimary * 0.2,
     )
     const shadowBottom = colorFor(
-      SHADOW,
+      palette,
+      palette.shadow,
       x,
       y * 2 + 1,
       bursts,
@@ -542,7 +572,8 @@ export function TauWordmark(): React.ReactNode {
         <Text
           key={x}
           color={colorFor(
-            baseInk(x),
+            palette,
+            baseInk(palette, x),
             x,
             y * 2 + 1,
             bursts,
@@ -575,7 +606,7 @@ export function TauWordmark(): React.ReactNode {
     }
 
     return (
-      <Text key={x} color={tone(baseInk(x), 0, 0)}>
+      <Text key={x} color={tone(palette, baseInk(palette, x), 0, 0)}>
         {char}
       </Text>
     )

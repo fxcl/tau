@@ -8,6 +8,7 @@ import type {
   LocalJSXCommandCall,
   LocalJSXCommandContext,
 } from '../../types/command.js'
+import type { AppState } from '../../state/AppStateStore.js'
 import { stripSignatureBlocks } from '../../utils/messages.js'
 import {
   getAPIProvider,
@@ -26,14 +27,13 @@ import {
   type BrowsableModelProvider,
 } from '../../utils/model/providerCatalog.js'
 import { getProviderModelDisplayName } from '../../utils/model/display.js'
+import { isConcreteOpenAIGptModelForProvider } from '../../utils/model/openaiGptModels.js'
 import {
   getVoiceConversationModelDisplayName,
   setSelectedVoiceModel,
 } from '../../voice/voiceConversation.js'
-
-function looksLikeConcreteOpenAIModelId(value: unknown): value is string {
-  return typeof value === 'string' && value.toLowerCase().startsWith('gpt-')
-}
+import { setClineEffort } from '../../utils/model/clineThinking.js'
+import { isClinePassProvider } from '../../utils/model/clinePassCatalog.js'
 
 function renderSearchBadges(tags?: readonly string[]): string {
   if (!tags || tags.length === 0) {
@@ -62,7 +62,7 @@ function ModelsPickerWrapper({
 }) {
   const setAppState = useSetAppState()
   const currentProvider = getAPIProvider()
-  const currentModel = useAppState(s => s.mainLoopModel)
+  const currentModel = useAppState((s: AppState) => s.mainLoopModel)
   const initialProvider = lockedProvider ?? getDefaultBrowsableProvider(currentProvider)
 
   function handleSelect(provider: BrowsableModelProvider, modelId: string) {
@@ -83,12 +83,16 @@ function ModelsPickerWrapper({
 
     const selection = resolveProviderModelSelection(provider, modelId)
 
+    if (isClinePassProvider(provider) && selection.clineEffort) {
+      setClineEffort(selection.modelId, selection.clineEffort)
+    }
+
     const providerChanged = currentProvider !== provider
     const modelChanged = currentModel !== selection.modelId
     if (providerChanged) {
       setActiveProvider(provider)
     }
-    if (provider === 'openai' && looksLikeConcreteOpenAIModelId(selection.modelId)) {
+    if (isConcreteOpenAIGptModelForProvider(selection.modelId, provider)) {
       setMainLoopModelOverride(selection.modelId)
     }
 
@@ -128,6 +132,8 @@ function ModelsPickerWrapper({
       ?? selection.modelId
     const effortNote = selection.effort
       ? ` with ${chalk.bold(selection.effort)} effort`
+      : selection.clineEffort
+        ? ` with ${chalk.bold(selection.clineEffort === 'none' ? 'Off' : selection.clineEffort === 'xhigh' ? 'Extra High' : selection.clineEffort)} thinking`
       : ''
 
     onDone(`Set model to ${chalk.bold(displayModel)}${effortNote}${providerNote}`)

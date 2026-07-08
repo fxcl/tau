@@ -16,7 +16,7 @@
 
 import type { ModelInfo } from '../../services/api/providers/base_provider.js'
 import {
-  ANTIGRAVITY_MODELS,
+  ANTIGRAVITY_PICKER_MODELS,
   ensureCodeAssistReady,
   executorForModel,
   parseCodeAssistSSE,
@@ -28,9 +28,14 @@ import {
   codeAssistGenerationBasesForModel,
   clearCodeAssistCache,
   isAntigravityGeminiModel,
+  antigravityGeminiEndpointTimeoutMs,
+  antigravityGeminiStickyBase,
+  recordAntigravityGeminiServedBase,
+  shouldTryNextAntigravityGeminiEndpoint,
   warmupCodeAssist,
 } from '../../services/api/providers/gemini_code_assist.js'
 import { resolveCliModelsForPicker } from '../../services/api/providers/gemini_provider.js'
+import { writeAntigravityEndpointDebugEvent } from './antigravity_cache.js'
 import {
   classifyGeminiError,
   type ClassifiedGeminiError,
@@ -171,7 +176,6 @@ export async function* parseGeminiApiSSE(
 // ─── API Client ──────────────────────────────────────────────────
 
 const AI_STUDIO_BASE = 'https://generativelanguage.googleapis.com/v1beta'
-const ANTIGRAVITY_GEMINI_ENDPOINT_TIMEOUT_MS = 6_000
 const ANTIGRAVITY_GEMINI_MAX_RETRY_ATTEMPTS = 2
 const ANTIGRAVITY_GEMINI_MAX_RETRY_WAIT_MS = 4_000
 
@@ -186,15 +190,6 @@ function isAntigravityGeminiRoute(executor: 'cli' | 'antigravity', model: string
   return executor === 'antigravity' && isAntigravityGeminiModel(model)
 }
 
-function antigravityGeminiEndpointTimeoutMs(): number {
-  const raw = process.env.TAU_ANTIGRAVITY_GEMINI_ENDPOINT_TIMEOUT_MS
-  if (raw) {
-    const n = Number.parseInt(raw, 10)
-    if (Number.isFinite(n) && n >= 0) return n
-  }
-  return ANTIGRAVITY_GEMINI_ENDPOINT_TIMEOUT_MS
-}
-
 function antigravityGeminiRetryOptions(
   signal: AbortSignal | undefined,
   enabled: boolean,
@@ -207,18 +202,6 @@ function antigravityGeminiRetryOptions(
     maxDelayMs: 2_000,
     maxRetryAfterMs: ANTIGRAVITY_GEMINI_MAX_RETRY_WAIT_MS,
   }
-}
-
-function shouldTryNextAntigravityGeminiEndpoint(
-  executor: 'cli' | 'antigravity',
-  model: string,
-  status: number,
-  index: number,
-  total: number,
-): boolean {
-  if (!isAntigravityGeminiRoute(executor, model)) return false
-  if (index >= total - 1) return false
-  return status === 404 || status === 408 || status === 429 || status === 499 || status >= 500
 }
 
 async function fetchCodeAssistEndpoint(
@@ -491,13 +474,16 @@ class GeminiApiClient {
       // outside retryWithBackoff and the cleared cache was moot).
       let reonboardsLeft = 1
       let sigStripsLeft = 1
-      const urlsForExecutor = (executor: 'cli' | 'antigravity') =>
-        codeAssistGenerationBasesForModel(executor, model).map(base => `${base}:streamGenerateContent?alt=sse`)
+      const basesForExecutor = (executor: 'cli' | 'antigravity') =>
+        codeAssistGenerationBasesForModel(executor, model, tauStableSessionId)
+      const urlForBase = (base: string) => `${base}:streamGenerateContent?alt=sse`
       const _ttftStart = Date.now()
       const rotation = getAntigravityRotation()
+      let attemptNo = 0
 
       const response = await retryWithBackoff(
         async () => {
+          attemptNo++
           // Re-pick the token each attempt so rate-limit rotation applies
           // across retries — a 429 on account A gets the next call onto
           // account B. `_tokenForModel` consults rotation.pickForModel().
@@ -528,8 +514,21 @@ class GeminiApiClient {
 
           let resp: Response | null = null
           let errText = ''
-          const urls = urlsForExecutor(executor)
+          const bases = basesForExecutor(executor)
+          const urls = bases.map(urlForBase)
           const fastAntigravityGemini = isAntigravityGeminiRoute(executor, model)
+          // Endpoint affinity: each host runs its own implicit-cache pool, so
+          // once this process has cache equity on a host, slowness alone must
+          // not re-route requests — a detour re-bills the whole prompt cold on
+          // the other pool. Only the pinned first attempt gets the long grace
+          // window; real failures (HTTP errors, network) still fall through,
+          // and whichever host serves becomes the process-wide pin.
+          const onPinnedHost = fastAntigravityGemini
+            && antigravityGeminiStickyBase(tauStableSessionId) === bases[0]
+          // First attempt on the pinned host absorbs transient failures via
+          // retryWithBackoff (same host, Retry-After honored, account
+          // rotation applied) instead of hopping to the sibling cache pool.
+          const pinnedFirstAttempt = onPinnedHost && attemptNo <= 1
           let lastEndpointError: unknown
           for (let i = 0; i < urls.length; i++) {
             try {
@@ -543,19 +542,44 @@ class GeminiApiClient {
                 {
                   signal,
                   timeoutMs: fastAntigravityGemini
-                    ? antigravityGeminiEndpointTimeoutMs()
+                    ? antigravityGeminiEndpointTimeoutMs(i, urls.length, i === 0 && onPinnedHost)
                     : 0,
                 },
               )
             } catch (err) {
               if (signal?.aborted) throw err
               lastEndpointError = err
-              if (fastAntigravityGemini && i < urls.length - 1) continue
+              if (fastAntigravityGemini && i < urls.length - 1) {
+                writeAntigravityEndpointDebugEvent(tauStableSessionId, 'hop', {
+                  from: bases[i],
+                  reason: err instanceof EndpointTimeoutError
+                    ? 'timeout'
+                    : String((err as any)?.code ?? (err as any)?.message ?? err).slice(0, 120),
+                  attempt: attemptNo,
+                })
+                continue
+              }
               throw err
             }
-            if (resp.ok) break
+            if (resp.ok) {
+              if (fastAntigravityGemini) {
+                recordAntigravityGeminiServedBase(tauStableSessionId, bases[i]!)
+                writeAntigravityEndpointDebugEvent(tauStableSessionId, 'served', {
+                  base: bases[i],
+                  index: i,
+                  attempt: attemptNo,
+                  account: accountEmail,
+                })
+              }
+              break
+            }
             errText = await resp.text().catch(() => '')
-            if (shouldTryNextAntigravityGeminiEndpoint(executor, model, resp.status, i, urls.length)) {
+            if (shouldTryNextAntigravityGeminiEndpoint(executor, model, resp.status, i, urls.length, pinnedFirstAttempt)) {
+              writeAntigravityEndpointDebugEvent(tauStableSessionId, 'hop', {
+                from: bases[i],
+                reason: `status ${resp.status}`,
+                attempt: attemptNo,
+              })
               continue
             }
             if (!(executor === 'antigravity' && resp.status === 404 && i < urls.length - 1)) break
@@ -631,6 +655,14 @@ class GeminiApiClient {
               && sigStripsLeft > 0
             ) {
               sigStripsLeft--
+              if (fastAntigravityGemini) {
+                // The stripped retry sends different history bytes, so that
+                // turn re-pays the prompt cold and its write is orphaned —
+                // surface it instead of leaving an unexplained cold turn.
+                writeAntigravityEndpointDebugEvent(tauStableSessionId, 'sig-strip', {
+                  attempt: attemptNo,
+                })
+              }
               this._stripThoughtSignaturesFromBody(body)
               throw new GeminiApiError(resp.status, errText, 0, {
                 kind: 'transient',
@@ -739,12 +771,15 @@ class GeminiApiClient {
     if (oauthRouting) {
       let reonboardsLeft = 1
       let sigStripsLeft = 1
-      const urlsForExecutor = (executor: 'cli' | 'antigravity') =>
-        codeAssistGenerationBasesForModel(executor, model).map(base => `${base}:generateContent`)
+      const basesForExecutor = (executor: 'cli' | 'antigravity') =>
+        codeAssistGenerationBasesForModel(executor, model, tauStableSessionId)
+      const urlForBase = (base: string) => `${base}:generateContent`
       const rotation = getAntigravityRotation()
+      let attemptNo = 0
 
       const data = await retryWithBackoff(
         async () => {
+          attemptNo++
           const routing = this._tokenForModel(model)
           if (!routing) {
             throw new GeminiApiError(0, 'No OAuth credentials available', undefined, {
@@ -770,8 +805,21 @@ class GeminiApiClient {
 
           let resp: Response | null = null
           let errText = ''
-          const urls = urlsForExecutor(executor)
+          const bases = basesForExecutor(executor)
+          const urls = bases.map(urlForBase)
           const fastAntigravityGemini = isAntigravityGeminiRoute(executor, model)
+          // Endpoint affinity: each host runs its own implicit-cache pool, so
+          // once this process has cache equity on a host, slowness alone must
+          // not re-route requests — a detour re-bills the whole prompt cold on
+          // the other pool. Only the pinned first attempt gets the long grace
+          // window; real failures (HTTP errors, network) still fall through,
+          // and whichever host serves becomes the process-wide pin.
+          const onPinnedHost = fastAntigravityGemini
+            && antigravityGeminiStickyBase(tauStableSessionId) === bases[0]
+          // First attempt on the pinned host absorbs transient failures via
+          // retryWithBackoff (same host, Retry-After honored, account
+          // rotation applied) instead of hopping to the sibling cache pool.
+          const pinnedFirstAttempt = onPinnedHost && attemptNo <= 1
           let lastEndpointError: unknown
           for (let i = 0; i < urls.length; i++) {
             try {
@@ -785,19 +833,44 @@ class GeminiApiClient {
                 {
                   signal,
                   timeoutMs: fastAntigravityGemini
-                    ? antigravityGeminiEndpointTimeoutMs()
+                    ? antigravityGeminiEndpointTimeoutMs(i, urls.length, i === 0 && onPinnedHost)
                     : 0,
                 },
               )
             } catch (err) {
               if (signal?.aborted) throw err
               lastEndpointError = err
-              if (fastAntigravityGemini && i < urls.length - 1) continue
+              if (fastAntigravityGemini && i < urls.length - 1) {
+                writeAntigravityEndpointDebugEvent(tauStableSessionId, 'hop', {
+                  from: bases[i],
+                  reason: err instanceof EndpointTimeoutError
+                    ? 'timeout'
+                    : String((err as any)?.code ?? (err as any)?.message ?? err).slice(0, 120),
+                  attempt: attemptNo,
+                })
+                continue
+              }
               throw err
             }
-            if (resp.ok) break
+            if (resp.ok) {
+              if (fastAntigravityGemini) {
+                recordAntigravityGeminiServedBase(tauStableSessionId, bases[i]!)
+                writeAntigravityEndpointDebugEvent(tauStableSessionId, 'served', {
+                  base: bases[i],
+                  index: i,
+                  attempt: attemptNo,
+                  account: accountEmail,
+                })
+              }
+              break
+            }
             errText = await resp.text().catch(() => '')
-            if (shouldTryNextAntigravityGeminiEndpoint(executor, model, resp.status, i, urls.length)) {
+            if (shouldTryNextAntigravityGeminiEndpoint(executor, model, resp.status, i, urls.length, pinnedFirstAttempt)) {
+              writeAntigravityEndpointDebugEvent(tauStableSessionId, 'hop', {
+                from: bases[i],
+                reason: `status ${resp.status}`,
+                attempt: attemptNo,
+              })
               continue
             }
             if (!(executor === 'antigravity' && resp.status === 404 && i < urls.length - 1)) break
@@ -856,6 +929,14 @@ class GeminiApiClient {
               && sigStripsLeft > 0
             ) {
               sigStripsLeft--
+              if (fastAntigravityGemini) {
+                // The stripped retry sends different history bytes, so that
+                // turn re-pays the prompt cold and its write is orphaned —
+                // surface it instead of leaving an unexplained cold turn.
+                writeAntigravityEndpointDebugEvent(tauStableSessionId, 'sig-strip', {
+                  attempt: attemptNo,
+                })
+              }
               this._stripThoughtSignaturesFromBody(body)
               throw new GeminiApiError(resp.status, errText, 0, {
                 kind: 'transient',
@@ -940,7 +1021,7 @@ class GeminiApiClient {
 
     if (providerFilter === 'antigravity') {
       if (!this.antigravityOAuthToken) return []
-      return [...ANTIGRAVITY_MODELS]
+      return [...ANTIGRAVITY_PICKER_MODELS]
     }
 
     // `providerFilter` is how the UX split between the Gemini row and the
@@ -974,7 +1055,7 @@ class GeminiApiClient {
         models.push(...resolveCliModelsForPicker())
       }
       if (showAntigravity && this.antigravityOAuthToken) {
-        models.push(...ANTIGRAVITY_MODELS)
+        models.push(...ANTIGRAVITY_PICKER_MODELS)
       }
       return models
     }

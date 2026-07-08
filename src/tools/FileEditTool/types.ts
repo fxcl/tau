@@ -75,6 +75,12 @@ const outputSchema = lazySchema(() =>
       .boolean()
       .describe('Whether the user modified the proposed changes'),
     replaceAll: z.boolean().describe('Whether all occurrences were replaced'),
+    noOp: z
+      .boolean()
+      .optional()
+      .describe(
+        'True when the edit resolved to no change (e.g. old_string === new_string, or the replacement equals the current text). Nothing was written.',
+      ),
     gitDiff: gitDiffSchema().optional(),
     syntaxWarning: z
       .string()

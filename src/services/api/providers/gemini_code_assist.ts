@@ -10,7 +10,7 @@
  *
  * Code Assist endpoints:
  *   https://cloudcode-pa.googleapis.com/v1internal:{method}
- *   https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:{method} for
+ *   https://daily-cloudcode-pa.googleapis.com/v1internal:{method} for
  *   Antigravity generateContent / streamGenerateContent
  *
  * Request body is wrapped (Antigravity format from CLIProxyAPI):
@@ -89,8 +89,12 @@ export function codeAssistGenerationBases(executor: GeminiExecutor): readonly st
 // multi-entry cache hits regardless). Give Gemini its own order that prefers
 // the PRODUCTION host (cloudcode-pa) — the fastest reliable channel, which
 // still serves the implicit cache — with the daily host kept as the
-// known-good-cache fallback and sandbox last. Claude's order is untouched.
+// known-good-cache fallback. Sandbox is opt-in for Gemini because it is the
+// flaky host that commonly turns a fallback chain into a terminal timeout.
+// Claude's order is untouched.
 //
+const ANTIGRAVITY_GEMINI_ENDPOINT_TIMEOUT_MS = 6_000
+
 // Tunable per machine: TAU_ANTIGRAVITY_GEMINI_ENDPOINT=prod|daily|sandbox
 // picks the primary (e.g. set `daily` to restore the previous behavior).
 function antigravityGeminiGenerationBases(): readonly string[] {
@@ -99,26 +103,187 @@ function antigravityGeminiGenerationBases(): readonly string[] {
   const sandbox = `${ANTIGRAVITY_ENDPOINT_DAILY_SANDBOX}/v1internal`
   switch (process.env.TAU_ANTIGRAVITY_GEMINI_ENDPOINT?.toLowerCase()) {
     case 'daily':
-      return [daily, prod, sandbox]
+      return [daily, prod]
     case 'sandbox':
       return [sandbox, prod, daily]
     default:
-      return [prod, daily, sandbox] // prod-first: fast + reliable cache
+      return [prod, daily] // prod-first: fast + reliable cache
   }
+}
+
+export function antigravityGeminiEndpointTimeoutMs(
+  endpointIndex: number,
+  endpointCount: number,
+  onPinnedHost = false,
+): number {
+  if (endpointIndex >= endpointCount - 1) return 0
+
+  if (onPinnedHost) {
+    // The session's implicit-cache entry lives on the pinned (first) host.
+    // Falling over re-bills the whole prompt cold on the other host, and a
+    // cache-missing turn on a HEALTHY host regularly holds headers 5-23s
+    // before the first token — so only a genuinely hung host is worth
+    // abandoning once a session has cache equity.
+    const raw = process.env.TAU_ANTIGRAVITY_GEMINI_STICKY_TIMEOUT_MS
+    if (raw) {
+      const n = Number.parseInt(raw, 10)
+      if (Number.isFinite(n) && n >= 0) return n
+    }
+    return ANTIGRAVITY_GEMINI_STICKY_TIMEOUT_MS
+  }
+
+  const raw = process.env.TAU_ANTIGRAVITY_GEMINI_ENDPOINT_TIMEOUT_MS
+  if (raw) {
+    const n = Number.parseInt(raw, 10)
+    if (Number.isFinite(n) && n >= 0) return n
+  }
+  return ANTIGRAVITY_GEMINI_ENDPOINT_TIMEOUT_MS
+}
+
+/**
+ * Whether a failed HTTP status on one generation host should be retried on
+ * the next host in the chain (Antigravity Gemini only — other routes keep
+ * their single-host semantics).
+ */
+export function shouldTryNextAntigravityGeminiEndpoint(
+  executor: GeminiExecutor,
+  model: string,
+  status: number,
+  index: number,
+  total: number,
+  pinnedFirstAttempt = false,
+): boolean {
+  if (!(executor === 'antigravity' && isAntigravityGeminiModel(model))) return false
+  if (index >= total - 1) return false
+  // 404 = this host doesn't serve the route/model at all — deterministic,
+  // hop immediately (retrying the same host can never fix it).
+  if (status === 404) return true
+  // Transient/quota failure on the session's PINNED host: stay home on the
+  // first attempt and let retryWithBackoff retry it (it honors Retry-After
+  // and rotates accounts). Hopping would re-bill the whole prompt cold on
+  // the sibling host's separate cache pool for an error that usually clears
+  // in seconds — and an Antigravity 429 is account/quota-scoped, so the
+  // sibling host rarely fixes it anyway. From the second attempt on the hop
+  // is allowed, so a genuinely-down host still fails over (and the pin
+  // migrates to whichever host serves).
+  if (pinnedFirstAttempt && index === 0) return false
+  return status === 408 || status === 429 || status === 499 || status >= 500
+}
+
+// ── Antigravity Gemini per-session endpoint affinity ─────────────
+//
+// Each generation host (prod cloudcode-pa / daily / sandbox) runs its OWN
+// implicit-cache pool: an entry committed on one host is invisible to the
+// others. Any mid-session host change therefore costs one full-price cold
+// turn on the new host and orphans the entry on the old one. The 6s latency
+// probe above made that routine: the backend holds response headers until
+// the first token is ready, and a cache-missing turn takes 5-23s — so a
+// slow-but-healthy primary was silently re-served by the fallback host at
+// full token price (live transcripts show hit → FULL COLD → hit on the very
+// same cache entry). Affinity pins a session to whichever host actually
+// serves it: later requests try that host first under the long sticky
+// timeout (slowness never moves a pinned session; HTTP errors and network
+// failures still do), and when a fallback DOES serve, the pin migrates so a
+// real outage costs one cold turn total instead of one per flap.
+
+const ANTIGRAVITY_GEMINI_STICKY_TIMEOUT_MS = 30_000
+const ANTIGRAVITY_GEMINI_AFFINITY_GLOBAL_KEY = '<antigravity-gemini>'
+const ANTIGRAVITY_GEMINI_AFFINITY_CAP = 256
+
+const _antigravityGeminiServedBase = new Map<string, string>()
+
+// The pin is PROCESS-WIDE, not per-session: every session in a tau process
+// (main thread, subagents, summary side queries) shares repo, system prompt
+// and — for context clones — the conversation bytes themselves, so they hit
+// each other's cache entries whenever they land on the same host (live
+// 2026-07-03: agents read the main session's entries at 67-97%). Per-session
+// pins let an agent's FIRST request race the 6s probe with no pin and get
+// punted to the sibling host — a 61.5k-token full cold observed live. One
+// shared pin means only the very first Antigravity Gemini request of the
+// process races; everything after follows the same host together (and
+// migrates together on a real failure).
+function antigravityGeminiAffinityKey(_sessionKey: string | undefined): string {
+  return ANTIGRAVITY_GEMINI_AFFINITY_GLOBAL_KEY
+}
+
+/** Host that served this session's last successful response, if any. */
+export function antigravityGeminiStickyBase(
+  sessionKey: string | undefined,
+): string | undefined {
+  return _antigravityGeminiServedBase.get(antigravityGeminiAffinityKey(sessionKey))
+}
+
+// Migration hysteresis: the pin is shared by the whole process, so moving it
+// on a SINGLE fallback serve lets one transient blip (live 2026-07-04: one
+// `fetch failed` on an agent request) drag every other session onto a host
+// with zero cache equity — the main thread paid a 70k-token full cold on the
+// very next turn while the pinned host was perfectly healthy. Require two
+// CONSECUTIVE non-pinned serves before migrating: a real outage produces them
+// immediately (every request detours), a one-off detour never does.
+const PIN_MIGRATION_STREAK = 2
+let _pinMissStreak = 0
+
+/**
+ * Record which host served a successful Antigravity Gemini response so the
+ * process's next request goes there first (see codeAssistGenerationBasesForModel).
+ */
+export function recordAntigravityGeminiServedBase(
+  sessionKey: string | undefined,
+  base: string,
+): void {
+  const key = antigravityGeminiAffinityKey(sessionKey)
+  const previous = _antigravityGeminiServedBase.get(key)
+  if (previous === base) {
+    _pinMissStreak = 0
+    return
+  }
+  if (previous !== undefined) {
+    _pinMissStreak++
+    if (_pinMissStreak < PIN_MIGRATION_STREAK) return
+  }
+  _pinMissStreak = 0
+  // Delete-then-set keeps insertion order ≈ recency so the cap drops the
+  // stalest session, not an active one.
+  _antigravityGeminiServedBase.delete(key)
+  _antigravityGeminiServedBase.set(key, base)
+  if (_antigravityGeminiServedBase.size > ANTIGRAVITY_GEMINI_AFFINITY_CAP) {
+    const oldest = _antigravityGeminiServedBase.keys().next().value
+    if (oldest !== undefined) _antigravityGeminiServedBase.delete(oldest)
+  }
+  if (process.env.TAU_CACHE_DEBUG) {
+    const host = (value: string): string => value.replace(/^https?:\/\//, '').split('/')[0]!
+    console.error(
+      previous
+        ? `[tau-endpoint] antigravity-gemini pinned host CHANGED ${host(previous)} → ${host(base)} (cache restarts cold on the new host)`
+        : `[tau-endpoint] antigravity-gemini session pinned to ${host(base)}`,
+    )
+  }
+}
+
+export function _resetAntigravityGeminiAffinityForTest(): void {
+  _antigravityGeminiServedBase.clear()
+  _pinMissStreak = 0
 }
 
 /**
  * Generation endpoint order for a specific model. Antigravity Gemini prefers
- * the production host for latency (see antigravityGeminiGenerationBases);
+ * the production host for latency (see antigravityGeminiGenerationBases) and
+ * pins each session to the host that actually served it (cache affinity);
  * Claude-on-Antigravity and CLI Gemini keep the executor-default order so
  * their already-fast paths are not disturbed.
  */
 export function codeAssistGenerationBasesForModel(
   executor: GeminiExecutor,
   model: string,
+  sessionKey?: string,
 ): readonly string[] {
   if (executor === 'antigravity' && isAntigravityGeminiModel(model)) {
-    return antigravityGeminiGenerationBases()
+    const bases = antigravityGeminiGenerationBases()
+    const sticky = antigravityGeminiStickyBase(sessionKey)
+    if (sticky && sticky !== bases[0] && bases.includes(sticky)) {
+      return [sticky, ...bases.filter(base => base !== sticky)]
+    }
+    return bases
   }
   return codeAssistGenerationBases(executor)
 }
@@ -149,9 +314,32 @@ const ANTIGRAVITY_WIRE_MODEL_DISPLAY_NAMES = new Map<string, string>([
   ['gemini-3-flash-low', 'Gemini 3 Flash (Low)'],
 ])
 
+// Model-picker subset: `gemini-3-flash` stays fully ROUTABLE (it remains in
+// ANTIGRAVITY_MODELS / ANTIGRAVITY_MODEL_IDS so saved configs and explicit
+// --model flags keep working, with all cache discipline applied) but is
+// hidden from model selection — its serving channel commits the implicit
+// cache slowly (~40-50s vs 10-20s on 3.5-flash) and misses replicas often
+// (live-measured 64-71% vs 85-93% on 3.5-flash/Claude), so offering it in
+// the picker invites bad sessions for no capability gain.
+export const ANTIGRAVITY_PICKER_MODELS: readonly ModelInfo[] =
+  ANTIGRAVITY_MODELS.filter(model => model.id !== 'gemini-3-flash')
+
 export const ANTIGRAVITY_MODEL_IDS = new Set([
   ...ANTIGRAVITY_MODELS.map(model => model.id),
 ])
+
+/**
+ * True when the id routes to the Antigravity path — Gemini models AND the
+ * Claude models resold through the same proxy. Single source of truth for
+ * the lazy-tools opt-out: the lane gate (lanes/gemini/lazy_tools.ts) and the
+ * upstream request-filter gate (utils/toolSearch.ts) must agree, otherwise
+ * claude.ts strips undiscovered deferred tools before the lane can decline.
+ */
+export function isAntigravityModelId(model: string): boolean {
+  return ANTIGRAVITY_MODEL_IDS.has(
+    model.toLowerCase().replace(/^models\//, ''),
+  )
+}
 
 /**
  * Gemini-family models on the Antigravity path — everything in the

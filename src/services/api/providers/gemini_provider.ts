@@ -34,7 +34,7 @@ import {
   type GeminiGenerateContentResponse,
 } from '../adapters/gemini_to_anthropic.js'
 import {
-  ANTIGRAVITY_MODELS,
+  ANTIGRAVITY_PICKER_MODELS,
   GEMINI_TIER_FREE,
   GEMINI_TIER_LEGACY,
   ensureCodeAssistReady,
@@ -50,7 +50,9 @@ import {
   geminiCLIApiHeaders,
   antigravityApiHeaders,
   codeAssistGenerationBasesForModel,
+  antigravityGeminiEndpointTimeoutMs,
   clearCodeAssistCache,
+  isAntigravityGeminiModel,
 } from './gemini_code_assist.js'
 import { getOrCreateCache, invalidateCache } from './gemini_cache.js'
 import { getProviderModelSet } from '../../../utils/model/configs.js'
@@ -72,6 +74,77 @@ function antigravitySessionHeaders(wrappedBody: Record<string, unknown>): Record
   return typeof request?.sessionId === 'string'
     ? { 'X-Machine-Session-Id': request.sessionId }
     : {}
+}
+
+class CodeAssistEndpointTimeoutError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'CodeAssistEndpointTimeoutError'
+  }
+}
+
+function isAntigravityGeminiRoute(executor: 'cli' | 'antigravity', model: string): boolean {
+  return executor === 'antigravity' && isAntigravityGeminiModel(model)
+}
+
+function shouldTryNextCodeAssistEndpoint(
+  executor: 'cli' | 'antigravity',
+  model: string,
+  status: number,
+  index: number,
+  total: number,
+): boolean {
+  if (index >= total - 1) return false
+  if (isAntigravityGeminiRoute(executor, model)) {
+    return status === 404 || status === 408 || status === 429 || status === 499 || status >= 500
+  }
+  return executor === 'antigravity' && status === 404
+}
+
+async function fetchCodeAssistEndpoint(
+  url: string,
+  init: RequestInit,
+  opts: {
+    timeoutMs: number
+    signal?: AbortSignal
+  },
+): Promise<Response> {
+  if (opts.timeoutMs <= 0) {
+    return fetch(url, {
+      ...init,
+      signal: opts.signal ?? init.signal,
+    })
+  }
+
+  const controller = new AbortController()
+  const onAbort = (): void => controller.abort(opts.signal?.reason)
+  if (opts.signal) {
+    if (opts.signal.aborted) throw new DOMException('Aborted', 'AbortError')
+    opts.signal.addEventListener('abort', onAbort, { once: true })
+  }
+
+  let timedOut = false
+  const timer = setTimeout(() => {
+    timedOut = true
+    controller.abort()
+  }, opts.timeoutMs)
+
+  try {
+    return await fetch(url, {
+      ...init,
+      signal: controller.signal,
+    })
+  } catch (err) {
+    if (timedOut && !opts.signal?.aborted) {
+      throw new CodeAssistEndpointTimeoutError(
+        `Antigravity Gemini endpoint timed out after ${opts.timeoutMs}ms: ${url}`,
+      )
+    }
+    throw err
+  } finally {
+    clearTimeout(timer)
+    opts.signal?.removeEventListener('abort', onAbort)
+  }
 }
 
 /**
@@ -645,18 +718,36 @@ export class GeminiProvider extends BaseProvider {
       let response: Response | null = null
       let errText = ''
       const urls = codeAssistGenerationBasesForModel(executor, model).map(base => `${base}:streamGenerateContent?alt=sse`)
+      const fastAntigravityGemini = isAntigravityGeminiRoute(executor, model)
+      let lastEndpointError: unknown
       for (let i = 0; i < urls.length; i++) {
-        response = await fetch(urls[i]!, {
-          method: 'POST',
-          headers,
-          body: JSON.stringify(wrapped),
-          signal: ac.signal,
-        })
+        try {
+          response = await fetchCodeAssistEndpoint(
+            urls[i]!,
+            {
+              method: 'POST',
+              headers,
+              body: JSON.stringify(wrapped),
+            },
+            {
+              signal: ac.signal,
+              timeoutMs: fastAntigravityGemini
+                ? antigravityGeminiEndpointTimeoutMs(i, urls.length)
+                : 0,
+            },
+          )
+        } catch (err) {
+          lastEndpointError = err
+          if (fastAntigravityGemini && i < urls.length - 1) continue
+          throw err
+        }
         if (response.ok) break
         errText = await response.text().catch(() => '')
-        if (!(executor === 'antigravity' && response.status === 404 && i < urls.length - 1)) break
+        if (shouldTryNextCodeAssistEndpoint(executor, model, response.status, i, urls.length)) continue
+        break
       }
       if (!response) {
+        if (lastEndpointError) throw lastEndpointError
         throw new Error('Gemini Code Assist error: no endpoint attempted')
       }
 
@@ -755,17 +846,35 @@ export class GeminiProvider extends BaseProvider {
       let response: Response | null = null
       let errText = ''
       const urls = codeAssistGenerationBasesForModel(executor, model).map(base => `${base}:generateContent`)
+      const fastAntigravityGemini = isAntigravityGeminiRoute(executor, model)
+      let lastEndpointError: unknown
       for (let i = 0; i < urls.length; i++) {
-        response = await fetch(urls[i]!, {
-          method: 'POST',
-          headers,
-          body: JSON.stringify(wrapped),
-        })
+        try {
+          response = await fetchCodeAssistEndpoint(
+            urls[i]!,
+            {
+              method: 'POST',
+              headers,
+              body: JSON.stringify(wrapped),
+            },
+            {
+              timeoutMs: fastAntigravityGemini
+                ? antigravityGeminiEndpointTimeoutMs(i, urls.length)
+                : 0,
+            },
+          )
+        } catch (err) {
+          lastEndpointError = err
+          if (fastAntigravityGemini && i < urls.length - 1) continue
+          throw err
+        }
         if (response.ok) break
         errText = await response.text().catch(() => '')
-        if (!(executor === 'antigravity' && response.status === 404 && i < urls.length - 1)) break
+        if (shouldTryNextCodeAssistEndpoint(executor, model, response.status, i, urls.length)) continue
+        break
       }
       if (!response) {
+        if (lastEndpointError) throw lastEndpointError
         throw new Error('Gemini Code Assist error: no endpoint attempted')
       }
 
@@ -907,7 +1016,7 @@ export class GeminiProvider extends BaseProvider {
         }
         models.push(...resolveCliModelsForPicker())
       }
-      if (this.antigravityOAuthToken) models.push(...ANTIGRAVITY_MODELS)
+      if (this.antigravityOAuthToken) models.push(...ANTIGRAVITY_PICKER_MODELS)
       return models
     }
 

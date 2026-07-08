@@ -161,6 +161,13 @@ const PROVIDER_META: Partial<Record<APIProvider, ProviderMeta>> = {
     supportsOAuth: true,
     oauthOnly: true,
   },
+  clinepass: {
+    envVar: '',
+    keyPrefix: '',
+    getKeyUrl: 'https://cline.bot',
+    supportsOAuth: true,
+    oauthOnly: true,
+  },
   iflow: {
     envVar: '',
     keyPrefix: '',
@@ -432,7 +439,14 @@ export function ProviderLoginFlow({ provider, onDone }: Props) {
             { method: 'oauth_kiro_builder', label: 'AWS Builder ID' },
           ]
       : oauthOnly
-        ? [{ method: 'oauth', label: isCursor ? 'Cursor browser login' : 'OAuth (Browser Login)' }]
+        ? [{
+            method: 'oauth',
+            label: isCursor
+              ? 'Cursor browser login'
+              : provider === 'clinepass'
+                ? 'Cline Pass login'
+                : 'OAuth (Browser Login)',
+          }]
         : supportsOAuth
           ? [
               { method: 'oauth', label: 'OAuth (Browser Login)' },
@@ -488,7 +502,7 @@ export function ProviderLoginFlow({ provider, onDone }: Props) {
       return
     }
 
-    if (provider === 'cline') {
+    if (provider === 'cline' || provider === 'clinepass') {
       setState({ step: 'oauth_pending' })
       initiateClineOAuth()
         .then(async (handles: ClineDeviceHandles) => {
@@ -499,7 +513,10 @@ export function ProviderLoginFlow({ provider, onDone }: Props) {
             verificationUri,
           })
           void openBrowser(verificationUri).catch(() => {})
-          const tokens = await completeClineOAuth(handles)
+          const tokens = await completeClineOAuth(
+            handles,
+            provider === 'clinepass' ? 'pass' : 'auth',
+          )
           deleteProviderKey(provider)
           void import('../services/api/providers/providerShim.js')
             .then(({ reloadClineLaneAuth }) => reloadClineLaneAuth())
@@ -509,7 +526,10 @@ export function ProviderLoginFlow({ provider, onDone }: Props) {
           return tokens
         })
         .catch((err) => {
-          setState({ step: 'error', message: err?.message ?? 'Cline OAuth failed' })
+          setState({
+            step: 'error',
+            message: err?.message ?? `${provider === 'clinepass' ? 'Cline Pass' : 'Cline'} OAuth failed`,
+          })
         })
       return
     }
@@ -914,7 +934,7 @@ export function ProviderLoginFlow({ provider, onDone }: Props) {
           <Text dimColor>
             {provider === 'cursor'
               ? 'Complete the login in your browser. Waiting for Cursor to confirm the sign-in...'
-              : provider === 'cline' || provider === 'copilot' || provider === 'kiro'
+              : provider === 'cline' || provider === 'clinepass' || provider === 'copilot' || provider === 'kiro'
                 ? 'Waiting for the device code...'
               : 'Complete the login in your browser. Waiting for callback...'}
           </Text>

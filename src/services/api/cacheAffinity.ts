@@ -31,6 +31,29 @@ export function providerUsesStableRequestSession(provider: string): boolean {
   return STABLE_REQUEST_SESSION_PROVIDERS.has(provider)
 }
 
+function usesRootProviderSession(querySource: QuerySource): boolean {
+  return (
+    querySource.startsWith('repl_main_thread') ||
+    querySource === 'sdk' ||
+    querySource === FORK_AGENT_QUERY_SOURCE
+  )
+}
+
+function derivedProviderSessionId(
+  rootSessionId: string,
+  kind: 'agent' | 'query',
+  value: string,
+): string {
+  const digest = createHash('sha256')
+    .update(rootSessionId)
+    .update(`\0${kind}\0`)
+    .update(value)
+    .digest('hex')
+    .slice(0, 32)
+
+  return `tau-${kind}-${digest}`
+}
+
 export function resolveProviderRequestSessionId({
   provider,
   rootSessionId,
@@ -47,6 +70,12 @@ export function resolveProviderRequestSessionId({
   const root = rootSessionId.trim()
   if (!root) return undefined
 
+  if (provider === 'openrouter') {
+    if (usesRootProviderSession(querySource)) return root
+    if (agentId) return derivedProviderSessionId(root, 'agent', agentId)
+    return derivedProviderSessionId(root, 'query', querySource)
+  }
+
   // Other cache-aware providers use the root Tau session as their stable
   // affinity/cache key. Antigravity is the exception: fresh subagents need
   // distinct derived sessions, while forks intentionally reuse the root.
@@ -56,12 +85,5 @@ export function resolveProviderRequestSessionId({
     return root
   }
 
-  const digest = createHash('sha256')
-    .update(root)
-    .update('\0agent\0')
-    .update(agentId)
-    .digest('hex')
-    .slice(0, 32)
-
-  return `tau-agent-${digest}`
+  return derivedProviderSessionId(root, 'agent', agentId)
 }

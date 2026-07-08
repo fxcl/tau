@@ -62,12 +62,34 @@ const MISS_COOLDOWN_TOO_SMALL_MS = 120_000
 // Cooldown after a transient error — shorter so we recover quickly.
 const MISS_COOLDOWN_ERROR_MS = 15_000
 
-// Minimum payload size before we even attempt to cache. Gemini rejects
-// small caches with a hard error; skipping the round trip saves latency.
-// 8 KB chars ≈ ~2 K tokens. Raised from 4096 to avoid micro-caches that
-// cost more in round-trips than they save. With the stable/volatile split,
-// the stable portion is always large enough for meaningful caching.
+// Economic floor before we even attempt to cache: micro-caches cost more
+// in create round-trips than they save. 8 KB chars ≈ ~2 K tokens.
 const MIN_CACHE_SIZE_CHARS = 8192
+
+// Server-side minimum cacheable size is MODEL-DEPENDENT (tokens):
+// 2.5 Pro requires 4,096; flash families 1,024; 3.x Pro 2,048. A single
+// flat guard sized for ~2K tokens let 2.5-Pro payloads between ~8 KB and
+// ~16 KB attempt a create the server always rejects ("too small"), then
+// re-attempt every cooldown — pure wasted round-trips. Small sessions
+// (cheap power mode strips optional tools) sit in exactly that window.
+// Estimated at 4 chars/token, conservatively high so the guard can only
+// skip caches the server would reject anyway, floored at the economic
+// minimum above.
+const MODEL_MIN_CACHE_TOKENS: ReadonlyArray<{ prefix: string; tokens: number }> = [
+  { prefix: 'gemini-2.5-pro', tokens: 4096 },
+  { prefix: 'gemini-3-pro', tokens: 2048 },
+  { prefix: 'gemini-3.1-pro', tokens: 2048 },
+]
+
+function minCacheSizeCharsForModel(model: string): number {
+  const lower = model.toLowerCase()
+  for (const entry of MODEL_MIN_CACHE_TOKENS) {
+    if (lower.startsWith(entry.prefix)) {
+      return Math.max(MIN_CACHE_SIZE_CHARS, entry.tokens * 4)
+    }
+  }
+  return MIN_CACHE_SIZE_CHARS
+}
 
 /**
  * Models that support context caching. Covers the full Gemini 2.5+ and
@@ -255,7 +277,7 @@ export async function getOrCreateCacheWithUsage(
 
   if (!supportsCaching(model)) return null
   if (!apiKey) return null
-  if (approxSize(systemInstruction, tools) < MIN_CACHE_SIZE_CHARS) return null
+  if (approxSize(systemInstruction, tools) < minCacheSizeCharsForModel(model)) return null
 
   const key = computeKey(model, systemInstruction, tools)
 
@@ -313,7 +335,7 @@ export function invalidateCache(cacheName: string): void {
 export function warmCache(args: GetOrCreateCacheArgs): void {
   if (!supportsCaching(args.model)) return
   if (!args.apiKey) return
-  if (approxSize(args.systemInstruction, args.tools) < MIN_CACHE_SIZE_CHARS) return
+  if (approxSize(args.systemInstruction, args.tools) < minCacheSizeCharsForModel(args.model)) return
   // Fire and forget — don't block the caller.
   getOrCreateCache(args).catch(() => {})
 }

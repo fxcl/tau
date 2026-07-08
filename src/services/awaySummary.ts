@@ -7,6 +7,7 @@ import {
   getAssistantMessageText,
 } from '../utils/messages.js'
 import { getSmallFastModel } from '../utils/model/model.js'
+import { areNonEssentialModelCallsDisabled } from '../utils/sideQueries.js'
 import { asSystemPrompt } from '../utils/systemPromptType.js'
 import { queryModelWithoutStreaming } from './api/claude.js'
 import { getSessionMemoryContent } from './SessionMemory/sessionMemoryUtils.js'
@@ -31,6 +32,10 @@ export async function generateAwaySummary(
   signal: AbortSignal,
 ): Promise<string | null> {
   if (messages.length === 0) {
+    return null
+  }
+  // Optional background call — suppressed by the side-query kill switch.
+  if (areNonEssentialModelCallsDisabled()) {
     return null
   }
 

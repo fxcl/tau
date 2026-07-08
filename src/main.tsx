@@ -137,6 +137,7 @@ import { countFilesRoundedRg } from './utils/ripgrep.js';
 import { processSessionStartHooks, processSetupHooks } from './utils/sessionStart.js';
 import { cacheSessionTitle, getSessionIdFromLog, loadTranscriptFromFile, saveAgentSetting, saveMode, searchSessionsByCustomTitle, sessionIdExists } from './utils/sessionStorage.js';
 import { ensureMdmSettingsLoaded } from './utils/settings/mdm/settings.js';
+import { getPowerModeFromSettings, seedSessionPowerMode } from './utils/powerMode.js';
 import { getInitialSettings, getManagedSettingsKeysForLogging, getSettingsForSource, getSettingsWithErrors } from './utils/settings/settings.js';
 import { resetSettingsCache } from './utils/settings/settingsCache.js';
 import type { ValidationError } from './utils/settings/validation.js';
@@ -2422,7 +2423,10 @@ async function run(): Promise<CommanderCommand> {
     // where trust is implicit). This prevents plugin LSP servers from executing
     // code in untrusted directories before user consent.
     // Must be after inline plugins are set (if any) so --plugin-dir LSP servers are included.
-    initializeLspServerManager();
+    // Cheap power mode never starts LSP; /mode starts it on demand when leaving cheap.
+    if (getPowerModeFromSettings(getInitialSettings()) !== 'cheap') {
+      initializeLspServerManager();
+    }
 
     // Show settings validation errors after trust is established
     // MCP config errors don't block settings from loading, so exclude them
@@ -3027,8 +3031,15 @@ async function run(): Promise<CommanderCommand> {
       /* eslint-enable @typescript-eslint/no-require-imports */
       ccrMirrorEnabled = isCcrMirrorEnabled();
     }
+    // Pin this session's power mode from the persisted setting before building
+    // initial state (the interactive path constructs its own AppState instead
+    // of going through getDefaultAppState). Keeps a running session on its own
+    // mode when another session edits the shared settings.json — see
+    // seedSessionPowerMode. Idempotent with any earlier seed.
+    const initialSettings = getInitialSettings();
+    seedSessionPowerMode(initialSettings);
     const initialState: AppState = {
-      settings: getInitialSettings(),
+      settings: initialSettings,
       tasks: {},
       agentNameRegistry: new Map(),
       verbose: verbose ?? getGlobalConfig().verbose ?? false,

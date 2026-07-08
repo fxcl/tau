@@ -29,10 +29,15 @@ import type {
   ProviderStreamResult,
 } from '../services/api/providers/base_provider.js'
 import { buildProviderStreamResult } from '../services/api/providers/base_provider.js'
-import { providerUsesStableRequestSession } from '../services/api/cacheAffinity.js'
+import {
+  providerUsesStableRequestSession,
+  resolveProviderRequestSessionId,
+} from '../services/api/cacheAffinity.js'
 import type { Lane } from './types.js'
 import { getSessionId } from '../bootstrap/state.js'
 import { filterProviderToolsForLane } from './tool_filter.js'
+import type { APIProvider } from '../utils/model/providers.js'
+import type { QuerySource } from '../constants/querySource.js'
 
 export class LaneBackedProvider implements BaseProvider {
   readonly name: string
@@ -66,9 +71,11 @@ export class LaneBackedProvider implements BaseProvider {
       typeof params.sessionId === 'string' && params.sessionId.trim().length > 0
         ? params.sessionId
         : undefined
-    const sessionId = providerUsesStableRequestSession(providerHint ?? '')
-      ? explicitSessionId ?? getSessionId()
-      : undefined
+    const sessionId = resolveBridgeSessionId(
+      providerHint,
+      explicitSessionId,
+      params.querySource,
+    )
 
     if (typeof lane.streamAsProvider !== 'function') {
       throw new Error(
@@ -94,6 +101,7 @@ export class LaneBackedProvider implements BaseProvider {
         thinking: params.thinking,
         signal: controller.signal,
         ...(sessionId ? { sessionId } : {}),
+        ...(params.querySource ? { querySource: params.querySource } : {}),
         providerHint: providerHint,
       })
       for await (const ev of gen) {
@@ -121,6 +129,23 @@ export class LaneBackedProvider implements BaseProvider {
   resolveModel(model: string): string {
     return this.lane.resolveModel(model)
   }
+}
+
+function resolveBridgeSessionId(
+  providerHint: string | undefined,
+  explicitSessionId: string | undefined,
+  querySource: string | undefined,
+): string | undefined {
+  if (!providerUsesStableRequestSession(providerHint ?? '')) return undefined
+  if (explicitSessionId) return explicitSessionId
+  if (providerHint && querySource) {
+    return resolveProviderRequestSessionId({
+      provider: providerHint as APIProvider,
+      rootSessionId: getSessionId(),
+      querySource: querySource as QuerySource,
+    })
+  }
+  return getSessionId()
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────

@@ -18,6 +18,7 @@ import { logEvent } from '../services/analytics/index.js'
 import { queryHaiku } from '../services/api/claude.js'
 import type { Message } from '../types/message.js'
 import { logForDebugging } from './debug.js'
+import { areNonEssentialModelCallsDisabled } from './sideQueries.js'
 import { safeParseJSON } from './json.js'
 import { lazySchema } from './lazySchema.js'
 import { extractTextContent } from './messages.js'
@@ -82,6 +83,8 @@ export async function generateSessionTitle(
 ): Promise<string | null> {
   const trimmed = description.trim()
   if (!trimmed) return null
+  // Optional background call — suppressed by the side-query kill switch.
+  if (areNonEssentialModelCallsDisabled()) return null
 
   try {
     const result = await queryHaiku({

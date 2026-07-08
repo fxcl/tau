@@ -45,8 +45,23 @@ import {
   applyClineReasoningToRequest,
   getClineRequestEffort,
   isClineThinkingModel,
+  stripClineEffortVariant,
 } from '../../utils/model/clineThinking.js'
+import {
+  CLINE_PASS_LABEL,
+  getClinePassModels,
+  isClinePassProvider,
+} from '../../utils/model/clinePassCatalog.js'
 import { buildClineToolsForRequest } from './tools.js'
+import {
+  buildClineBlockedInvalidToolCallText,
+  buildClineRequiredParamMap,
+  buildClineToolArgRepairMessage,
+  buildClineToolSchemaMap,
+  coerceClineToolCallArguments,
+  findClineToolCallsMissingRequiredArgs,
+  normalizeClineToolCallArgumentEvents,
+} from './tool_arg_validation.js'
 
 interface StoredClineOAuthBlob {
   accessToken?: string
@@ -111,6 +126,7 @@ const CLINE_CONTEXT_EXCEEDED_MARKERS = [
   'prompt is too long',
   'maximum context',
 ]
+const CLINE_TOOL_ARG_REPAIR_ATTEMPTS = 2
 
 const CLINE_FALLBACK_MODELS: ModelInfo[] = [
   { id: 'kwaipilot/kat-coder-pro', name: 'Kat Coder Pro' },
@@ -201,12 +217,16 @@ export class ClineLane implements Lane {
   readonly displayName = 'Cline'
 
   private oauthTokenHint: string | null = null
+  private clinePassOAuthTokenHint: string | null = null
   private modelCache: { models: ModelInfo[]; at: number } | null = null
   private reasoningModelIds = new Set<string>()
-  private refreshInFlight: Promise<string | null> | null = null
+  private refreshInFlight = new Map<string, Promise<string | null>>()
 
-  configure(opts: { oauthToken?: string | null }): void {
+  configure(opts: { oauthToken?: string | null; clinePassOAuthToken?: string | null }): void {
     if (opts.oauthToken !== undefined) this.oauthTokenHint = opts.oauthToken || null
+    if (opts.clinePassOAuthToken !== undefined) {
+      this.clinePassOAuthTokenHint = opts.clinePassOAuthToken || null
+    }
   }
 
   invalidateModelCache(): void {
@@ -220,7 +240,10 @@ export class ClineLane implements Lane {
   }
 
   isHealthy(): boolean {
-    return !!this._peekStoredOAuthCredential()
+    return !!(
+      this._peekStoredOAuthCredential('cline')
+      || this._peekStoredOAuthCredential('clinepass')
+    )
   }
 
   resolveModel(model: string): string {
@@ -235,7 +258,11 @@ export class ClineLane implements Lane {
     )
   }
 
-  async listModels(): Promise<ModelInfo[]> {
+  async listModels(providerFilter?: string): Promise<ModelInfo[]> {
+    if (isClinePassProvider(providerFilter)) {
+      return getClinePassModels()
+    }
+
     if (this.modelCache && Date.now() - this.modelCache.at < CLINE_MODELS_CACHE_TTL_MS) {
       return this.modelCache.models
     }
@@ -310,6 +337,7 @@ export class ClineLane implements Lane {
       models = [...CLINE_FALLBACK_MODELS]
     }
 
+    models = models.filter(model => !model.id.toLowerCase().startsWith('cline-pass/'))
     models = this._curateModels(models, recommendedIds, freeIds)
     this.reasoningModelIds = new Set(
       models
@@ -378,9 +406,12 @@ export class ClineLane implements Lane {
   async *streamAsProvider(
     params: LaneProviderCallParams,
   ): AsyncGenerator<AnthropicStreamEvent, NormalizedUsage> {
-    const auth = await this._resolveAuth()
+    const auth = await this._resolveAuth(params.providerHint)
     if (!auth) {
-      throw new Error('Cline lane: not authenticated. Run `/login cline` to authenticate.')
+      throw new Error(
+        `${this._authDisplayName(params.providerHint)} lane: not authenticated. `
+        + `Run \`${isClinePassProvider(params.providerHint) ? '/login cline pass' : '/login cline'}\` to authenticate.`,
+      )
     }
 
     const preserveCacheControl = this._supportsPromptCache(params.model)
@@ -390,8 +421,96 @@ export class ClineLane implements Lane {
       system,
       { preserveCacheControl },
     )
-    const tools = this._buildTools(params.tools)
-    const body = this._buildRequestBody({
+    const requiredParams = buildClineRequiredParamMap(params.tools)
+    const schemaByTool = buildClineToolSchemaMap(params.tools)
+    const knownToolNames = new Set(requiredParams.keys())
+
+    let requestMessages = messages
+    let response: Response
+    try {
+      response = await this._sendRequestWithSchemaFallback(auth, params, requestMessages)
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error)
+      yield* emitErrorTurn(`cline API connection error: ${message}`)
+      return blankUsage()
+    }
+
+    if (!response.ok) {
+      const errText = await response.text().catch(() => '')
+      const headline = clineErrorHeadline(response.status, errText)
+      yield* emitErrorTurn(`${headline}: ${errText.slice(0, 500)}`)
+      return blankUsage()
+    }
+
+    let collected = await this._collectResponseEvents(response)
+    collected.events = normalizeClineToolCallArgumentEvents(collected.events, params.tools)
+    let invalidToolCalls = findClineToolCallsMissingRequiredArgs(
+      collected.events,
+      requiredParams,
+      { knownToolNames, schemaByTool },
+    )
+
+    for (
+      let attempt = 1;
+      invalidToolCalls.length > 0 && attempt <= CLINE_TOOL_ARG_REPAIR_ATTEMPTS;
+      attempt += 1
+    ) {
+      requestMessages = [
+        ...messages,
+        buildClineToolArgRepairMessage(invalidToolCalls, attempt, schemaByTool),
+      ]
+
+      try {
+        response = await this._sendRequestWithSchemaFallback(auth, params, requestMessages)
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error)
+        yield* emitErrorTurn(`cline API connection error after tool-arg repair retry: ${message}`)
+        return blankUsage()
+      }
+
+      if (!response.ok) {
+        const errText = await response.text().catch(() => '')
+        const headline = clineErrorHeadline(response.status, errText)
+        yield* emitErrorTurn(`${headline}: ${errText.slice(0, 500)}`)
+        return blankUsage()
+      }
+
+      collected = await this._collectResponseEvents(response)
+      collected.events = normalizeClineToolCallArgumentEvents(collected.events, params.tools)
+      invalidToolCalls = findClineToolCallsMissingRequiredArgs(
+        collected.events,
+        requiredParams,
+        { knownToolNames, schemaByTool },
+      )
+    }
+
+    if (invalidToolCalls.length > 0) {
+      yield* emitErrorTurn(buildClineBlockedInvalidToolCallText(invalidToolCalls))
+      return collected.usage
+    }
+
+    for (const event of collected.events) {
+      yield event
+    }
+
+    return collected.usage
+  }
+
+  private _buildTools(
+    tools: LaneProviderCallParams['tools'],
+    opts: { strict?: boolean } = {},
+  ): OpenAITool[] {
+    return buildClineToolsForRequest(tools, opts)
+  }
+
+  private async _sendRequestWithSchemaFallback(
+    auth: ClineAuthSession,
+    params: LaneProviderCallParams,
+    messages: OpenAIMessage[],
+  ): Promise<Response> {
+    const preferStrict = clineModelHonorsOpenAIStrict(params.model)
+    let tools = this._buildTools(params.tools, { strict: preferStrict })
+    let body = this._buildRequestBody({
       model: params.model,
       messages,
       tools,
@@ -401,36 +520,48 @@ export class ClineLane implements Lane {
       thinking: params.thinking,
     })
 
-    let response: Response
-    try {
-      response = await fetch(`${this._apiRoot()}/chat/completions`, {
-        method: 'POST',
-        headers: this._buildHeaders(auth),
-        body: JSON.stringify(body),
-        signal: params.signal,
-      })
-    } catch (error: unknown) {
-      const message = error instanceof Error ? error.message : String(error)
-      yield* emitErrorTurn(`cline API connection error: ${message}`)
-      return blankUsage()
-    }
+    let response = await fetch(`${this._apiRoot(params.providerHint)}/chat/completions`, {
+      method: 'POST',
+      headers: this._buildHeaders(auth),
+      body: JSON.stringify(body),
+      signal: params.signal,
+    })
 
     if (!response.ok) {
-      const errText = await response.text().catch(() => '')
-      const lowered = errText.toLowerCase()
-      const isPromptTooLong = CLINE_CONTEXT_EXCEEDED_MARKERS.some((marker) => lowered.includes(marker))
-      const headline = isPromptTooLong
-        ? `Prompt is too long (cline ${response.status})`
-        : `cline API error ${response.status}`
-      yield* emitErrorTurn(`${headline}: ${errText.slice(0, 500)}`)
-      return blankUsage()
+      const errText = await response.clone().text().catch(() => '')
+      if (hasStrictClineTools(tools) && isClineStrictToolSchemaRejected(errText)) {
+        tools = this._buildTools(params.tools, { strict: false })
+        body = this._buildRequestBody({
+          model: params.model,
+          messages,
+          tools,
+          maxTokens: params.max_tokens,
+          temperature: params.temperature,
+          stopSequences: params.stop_sequences,
+          thinking: params.thinking,
+        })
+
+        response = await fetch(`${this._apiRoot(params.providerHint)}/chat/completions`, {
+          method: 'POST',
+          headers: this._buildHeaders(auth),
+          body: JSON.stringify(body),
+          signal: params.signal,
+        })
+      }
     }
 
+    return response
+  }
+
+  private async _collectResponseEvents(
+    response: Response,
+  ): Promise<{ events: AnthropicStreamEvent[]; usage: NormalizedUsage }> {
     if (!response.body) {
       throw new Error('Cline lane: empty response body')
     }
 
     let finalUsage = blankUsage()
+    const events: AnthropicStreamEvent[] = []
     const chunkStream = this._normalizeChunkStream(this._parseSSE(response.body))
 
     for await (const event of openAIStreamToAnthropicEvents(chunkStream)) {
@@ -443,14 +574,10 @@ export class ClineLane implements Lane {
           thinking_tokens: 0,
         }
       }
-      yield event
+      events.push(event)
     }
 
-    return finalUsage
-  }
-
-  private _buildTools(tools: LaneProviderCallParams['tools']): OpenAITool[] {
-    return buildClineToolsForRequest(tools)
+    return { events, usage: finalUsage }
   }
 
   private _buildRequestBody(opts: {
@@ -463,7 +590,7 @@ export class ClineLane implements Lane {
     thinking?: LaneProviderCallParams['thinking']
   }): Record<string, unknown> {
     const body: Record<string, unknown> = {
-      model: opts.model,
+      model: stripClineEffortVariant(opts.model),
       messages: opts.messages,
       stream: true,
       stream_options: { include_usage: true },
@@ -471,6 +598,7 @@ export class ClineLane implements Lane {
       ...(opts.tools.length > 0 && {
         tools: opts.tools,
         tool_choice: 'auto',
+        parallel_tool_calls: false,
       }),
       ...(opts.temperature !== undefined && { temperature: opts.temperature }),
       ...(opts.stopSequences && opts.stopSequences.length > 0 && { stop: opts.stopSequences }),
@@ -484,9 +612,10 @@ export class ClineLane implements Lane {
   }
 
   private _modelSupportsReasoning(model: string): boolean {
+    const baseModel = stripClineEffortVariant(model)
     return (
-      this.reasoningModelIds.has(normalizeClineModelId(model))
-      || clineModelSupportsReasoning(model)
+      this.reasoningModelIds.has(normalizeClineModelId(baseModel))
+      || clineModelSupportsReasoning(baseModel)
     )
   }
 
@@ -542,7 +671,7 @@ export class ClineLane implements Lane {
   }
 
   private _supportsPromptCache(model: string): boolean {
-    const normalized = model.toLowerCase()
+    const normalized = stripClineEffortVariant(model).toLowerCase()
     return (
       normalized.startsWith('anthropic/')
       || normalized.startsWith('openai/')
@@ -553,11 +682,12 @@ export class ClineLane implements Lane {
     )
   }
 
-  private _peekStoredOAuthCredential(): StoredClineOAuthBlob | null {
+  private _peekStoredOAuthCredential(providerHint?: string): StoredClineOAuthBlob | null {
     try {
-      const raw = loadProviderKey('cline_oauth')
+      const raw = loadProviderKey(this._oauthStorageKey(providerHint))
       if (!raw) {
-        if (this.oauthTokenHint) return { accessToken: this.oauthTokenHint }
+        const tokenHint = this._oauthTokenHint(providerHint)
+        if (tokenHint) return { accessToken: tokenHint }
         return null
       }
       const parsed = JSON.parse(raw) as StoredClineOAuthBlob
@@ -569,18 +699,20 @@ export class ClineLane implements Lane {
       }
       return null
     } catch {
-      return this.oauthTokenHint ? { accessToken: this.oauthTokenHint } : null
+      const tokenHint = this._oauthTokenHint(providerHint)
+      return tokenHint ? { accessToken: tokenHint } : null
     }
   }
 
-  private async _resolveAuth(): Promise<ClineAuthSession | null> {
-    const oauth = await this._getValidOAuthToken()
+  private async _resolveAuth(providerHint?: string): Promise<ClineAuthSession | null> {
+    const oauth = await this._getValidOAuthToken(providerHint)
     if (!oauth) return null
     return { token: oauth }
   }
 
-  private async _getValidOAuthToken(): Promise<string | null> {
-    const stored = this._peekStoredOAuthCredential()
+  private async _getValidOAuthToken(providerHint?: string): Promise<string | null> {
+    const storageKey = this._oauthStorageKey(providerHint)
+    const stored = this._peekStoredOAuthCredential(providerHint)
     if (!stored) return null
 
     const accessToken = typeof stored.accessToken === 'string' ? stored.accessToken : null
@@ -591,19 +723,24 @@ export class ClineLane implements Lane {
     if (!needsRefresh) return accessToken
     if (!refreshToken) return accessToken
 
-    if (!this.refreshInFlight) {
-      this.refreshInFlight = refreshClineOAuth(refreshToken)
+    if (!this.refreshInFlight.has(storageKey)) {
+      const refreshPromise = refreshClineOAuth(refreshToken, this._oauthTarget(providerHint))
         .then((token) => {
-          this.oauthTokenHint = token
+          if (isClinePassProvider(providerHint)) {
+            this.clinePassOAuthTokenHint = token
+          } else {
+            this.oauthTokenHint = token
+          }
           return token
         })
         .catch(() => null)
         .finally(() => {
-          this.refreshInFlight = null
+          this.refreshInFlight.delete(storageKey)
         })
+      this.refreshInFlight.set(storageKey, refreshPromise)
     }
 
-    const refreshed = await this.refreshInFlight
+    const refreshed = await this.refreshInFlight.get(storageKey)!
     if (refreshed) return refreshed
 
     const currentStillValid = accessToken && (
@@ -612,12 +749,32 @@ export class ClineLane implements Lane {
     return currentStillValid ? accessToken : null
   }
 
-  private _apiRoot(): string {
-    return `${this._apiBase()}/api/v1`
+  private _oauthStorageKey(providerHint?: string): string {
+    return isClinePassProvider(providerHint) ? 'clinepass_oauth' : 'cline_oauth'
   }
 
-  private _apiBase(): string {
-    const baseUrl = getProviderBaseUrl('cline').replace(/\/+$/, '')
+  private _oauthTarget(providerHint?: string): 'auth' | 'pass' {
+    return isClinePassProvider(providerHint) ? 'pass' : 'auth'
+  }
+
+  private _oauthTokenHint(providerHint?: string): string | null {
+    return isClinePassProvider(providerHint)
+      ? this.clinePassOAuthTokenHint
+      : this.oauthTokenHint
+  }
+
+  private _authDisplayName(providerHint?: string): string {
+    return isClinePassProvider(providerHint) ? CLINE_PASS_LABEL : 'Cline'
+  }
+
+  private _apiRoot(providerHint?: string): string {
+    return `${this._apiBase(providerHint)}/api/v1`
+  }
+
+  private _apiBase(providerHint?: string): string {
+    const baseUrl = getProviderBaseUrl(
+      isClinePassProvider(providerHint) ? 'clinepass' : 'cline',
+    ).replace(/\/+$/, '')
     return baseUrl
       .replace(/\/api\/v1$/i, '')
       .replace(/\/v1$/i, '')
@@ -679,6 +836,15 @@ export class ClineLane implements Lane {
           }
           if (typeof delta.reasoning === 'string' && !delta.reasoning_content) {
             delta.reasoning_content = delta.reasoning
+          }
+          // Some Cline upstreams return tool-call arguments as a parsed JSON
+          // object instead of the OpenAI-spec string. Left as-is, the Anthropic
+          // adapter concatenates it into "[object Object]" and every tool call
+          // decodes to {}. Coerce object/array arguments to a JSON string.
+          if (Array.isArray(delta.tool_calls)) {
+            delta.tool_calls = coerceClineToolCallArguments(
+              delta.tool_calls,
+            ) as typeof delta.tool_calls
           }
           return { ...choice, delta }
         })
@@ -870,6 +1036,50 @@ function clineBearerToken(token: string): string {
 
 function clineModelSupportsReasoning(model: string): boolean {
   return isClineThinkingModel(model)
+}
+
+/**
+ * Only genuine OpenAI models enforce OpenAI strict-mode constrained decoding
+ * server-side. The Cline gateway proxies `openai/*` straight through to
+ * OpenAI, so the all-required + nullable strict shaping is both honest and
+ * enforced there. Every other upstream on Cline (Claude, Gemini, MiniMax,
+ * GLM, Kimi, Qwen, DeepSeek, Grok, Kwaipilot, …) ignores `strict`; shaping
+ * their tool schemas for strict just promotes optional fields to "required"
+ * with nothing enforcing it, which drives weak models toward empty/garbage
+ * tool calls. Gate strict to the OpenAI family; everyone else gets the
+ * truthful wire schema. Mirrors codex (always real OpenAI → always strict)
+ * and the compat lane's per-provider `supportsStrictMode()`.
+ */
+function clineModelHonorsOpenAIStrict(model: string): boolean {
+  const normalized = model.toLowerCase()
+  return (
+    normalized.startsWith('openai/')
+    || normalized.includes('gpt-4')
+    || normalized.includes('gpt-5')
+  )
+}
+
+function clineErrorHeadline(status: number, errText: string): string {
+  const lowered = errText.toLowerCase()
+  const isPromptTooLong = CLINE_CONTEXT_EXCEEDED_MARKERS.some((marker) => lowered.includes(marker))
+  return isPromptTooLong
+    ? `Prompt is too long (cline ${status})`
+    : `cline API error ${status}`
+}
+
+function hasStrictClineTools(tools: OpenAITool[]): boolean {
+  return tools.some(tool => tool.function.strict === true)
+}
+
+function isClineStrictToolSchemaRejected(errText: string): boolean {
+  const lowered = errText.toLowerCase()
+  return (
+    lowered.includes('strict')
+    || lowered.includes('additionalproperties')
+    || lowered.includes('additional properties')
+    || lowered.includes('nullable')
+    || lowered.includes('schema')
+  )
 }
 
 function blankUsage(): NormalizedUsage {

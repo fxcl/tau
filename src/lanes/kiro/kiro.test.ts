@@ -751,6 +751,44 @@ function main(): void {
     assert(!JSON.stringify(payload).includes('tooluse_wrong'), 'mismatched tool result id must not reach Kiro payload')
   })
 
+  test('preserves Kiro error status for denied tool results', () => {
+    const payload = buildKiroPayload({
+      model: 'deepseek-3.2',
+      system: '',
+      tools: [],
+      messages: [
+        { role: 'user', content: 'inspect the repo' },
+        { role: 'assistant', content: [{ type: 'tool_use', id: 'tooluse_denied', name: 'ProjectWorkflow', input: { path: '.' } }] },
+        { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tooluse_denied', content: 'Permission denied by user', is_error: true }] },
+      ],
+    })
+
+    const results = payload.conversationState.currentMessage.userInputMessage.userInputMessageContext?.toolResults ?? []
+    assert(results.length === 1, `expected one current tool result, got ${results.length}`)
+    assert(results[0]?.toolUseId === 'tooluse_denied', `expected denied result id, got ${results[0]?.toolUseId ?? 'missing'}`)
+    assert(results[0]?.status === 'error', `expected denied tool result to be status=error, got ${results[0]?.status ?? 'missing'}`)
+    assert(results[0]?.content[0]?.text === 'Permission denied by user', 'expected denial text to be preserved')
+  })
+
+  test('preserves Kiro error status when repairing mismatched tool result ids', () => {
+    const payload = buildKiroPayload({
+      model: 'deepseek-3.2',
+      system: '',
+      tools: [],
+      messages: [
+        { role: 'user', content: 'inspect the repo' },
+        { role: 'assistant', content: [{ type: 'tool_use', id: 'tooluse_expected', name: 'AFTOutline', input: { path: 'src' } }] },
+        { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tooluse_wrong', content: 'Permission denied by user', is_error: true }] },
+      ],
+    })
+
+    const results = payload.conversationState.currentMessage.userInputMessage.userInputMessageContext?.toolResults ?? []
+    assert(results.length === 1, `expected one repaired current tool result, got ${results.length}`)
+    assert(results[0]?.toolUseId === 'tooluse_expected', `expected repaired id, got ${results[0]?.toolUseId ?? 'missing'}`)
+    assert(results[0]?.status === 'error', `expected repaired denied tool result to stay status=error, got ${results[0]?.status ?? 'missing'}`)
+    assert(results[0]?.content[0]?.text === 'Permission denied by user', 'expected denial text to be preserved')
+  })
+
   test('repairs mismatched Kiro tool result id in history before a later user turn', () => {
     const payload = buildKiroPayload({
       model: 'deepseek-3.2',

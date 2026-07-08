@@ -136,6 +136,8 @@ export interface LaneProviderCallParams {
   signal: AbortSignal
   /** Stable claudex session id for provider-side prompt-cache affinity. */
   sessionId?: string
+  /** Logical caller source used for diagnostics and cache-key isolation. */
+  querySource?: ProviderRequestParams['querySource']
   /**
    * Which sub-provider the shim was built for (e.g. 'groq',
    * 'openrouter', 'deepseek'). Shared lanes like openai-compat use

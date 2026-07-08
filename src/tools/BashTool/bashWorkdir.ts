@@ -1,4 +1,5 @@
 import { statSync } from 'fs'
+import { homedir } from 'os'
 import path from 'path'
 import pathWin32 from 'path/win32'
 import { getCwd } from '../../utils/cwd.js'
@@ -96,6 +97,59 @@ function recoverRepeatedWorkdirSuffix(
 }
 
 /**
+ * Recover a `cd`-derived workdir the model expressed relative to an ANCESTOR of
+ * cwd rather than to cwd itself — the common "I wrote the path from the project
+ * root, but the shell is actually in a subdirectory" mistake. Example:
+ *
+ *   cwd:       C:\repo\todo-app\backend
+ *   cd target: todo-app/frontend   (model treats cwd as C:\repo)
+ *   lexical:   C:\repo\todo-app\backend\todo-app\frontend   (does not exist)
+ *   recovered: C:\repo\todo-app\frontend                    (exists → use it)
+ *
+ * Only fires when the lexical workdir does NOT exist and the relative move has no
+ * `..`/absolute escape. Walks up cwd's ancestors (never scanning the user's home
+ * directory or above) and returns the NEAREST ancestor for which that same
+ * relative path resolves to a real directory — nearest-wins keeps it
+ * deterministic and biased toward the closest (most specific) project root. When
+ * nothing matches it returns the original workdir unchanged, so a genuinely bad
+ * path still surfaces the clear "workdir does not exist" error downstream rather
+ * than being silently redirected somewhere wrong. Complements
+ * recoverRepeatedWorkdirSuffix (which handles the reverse "suffix repeated"
+ * shape); the two are composed by normalizeBashExecutionInput.
+ */
+function recoverWorkdirFromAncestor(
+  cwd: string,
+  workdir: string,
+  platform: Platform,
+): string {
+  const api = pathApi(platform)
+  const absWorkdir = api.resolve(workdir)
+  if (isExistingDirectory(absWorkdir, platform)) return workdir
+
+  const absCwd = api.resolve(cwd)
+  const rel = api.relative(absCwd, absWorkdir)
+  // Only the "expressed relative to an ancestor" shape is recoverable: a forward
+  // relative move, no parent escape, not itself absolute.
+  if (!rel || rel.startsWith('..') || api.isAbsolute(rel)) return workdir
+
+  const fold = (p: string): string =>
+    platform === 'windows' ? p.toLowerCase() : p
+  const home = fold(api.resolve(homedir()))
+  let ancestor = api.dirname(absCwd)
+  for (let depth = 0; depth < 40; depth++) {
+    // Never treat home or above as a base — avoids matching a stray same-named
+    // directory elsewhere in the home tree that isn't the project the model meant.
+    if (fold(ancestor) === home) break
+    const candidate = api.resolve(ancestor, rel)
+    if (isExistingDirectory(candidate, platform)) return candidate
+    const parent = api.dirname(ancestor)
+    if (parent === ancestor) break
+    ancestor = parent
+  }
+  return workdir
+}
+
+/**
  * Translate shell-facing absolute path spellings into host fs spellings.
  * On Windows this lets Node validate Git Bash paths like /c/Users/...,
  * while non-Windows hosts keep /c/... as a real POSIX path.
@@ -189,6 +243,7 @@ export function normalizeBashExecutionInput<T extends BashExecutionWorkdirInput>
 ): T {
   if (input.command_parts) return input
 
+  const hadProvidedWorkdir = input.workdir !== undefined
   let command = input.command
   let workdir = input.workdir
     ? recoverRepeatedWorkdirSuffix(
@@ -214,6 +269,13 @@ export function normalizeBashExecutionInput<T extends BashExecutionWorkdirInput>
 
   if (convertedCd && workdir) {
     workdir = recoverRepeatedWorkdirSuffix(workdir, platform)
+    // A bare leading `cd <relative>` (no explicit workdir) is the case the model
+    // most often gets wrong by treating cwd as the project root. When the literal
+    // target does not exist, try resolving it against cwd's ancestors instead of
+    // letting it fail with a raw "workdir does not exist".
+    if (!hadProvidedWorkdir) {
+      workdir = recoverWorkdirFromAncestor(cwd, workdir, platform)
+    }
   }
 
   return changed

@@ -12,7 +12,7 @@ import { formatNumber } from './format.js';
 import { getIdeClientName, type IDEExtensionInstallationStatus, isJetBrainsIde, toIDEDisplayName } from './ide.js';
 import { getClaudeAiUserDefaultModelDescription } from './model/model.js';
 import { modelDisplayStringForProvider } from './model/display.js';
-import { getAPIProvider } from './model/providers.js';
+import { getAPIProvider, PROVIDER_DISPLAY_NAMES } from './model/providers.js';
 import { getMTLSConfig } from './mtls.js';
 import { checkInstall } from './nativeInstaller/index.js';
 import { getProxyUrl } from './proxy.js';
@@ -242,14 +242,9 @@ export function buildAPIProviderProperties(): Property[] {
   const apiProvider = getAPIProvider();
   const properties: Property[] = [];
   if (apiProvider !== 'firstParty') {
-    const providerLabel = {
-      bedrock: 'AWS Bedrock',
-      vertex: 'Google Vertex AI',
-      foundry: 'Microsoft Foundry'
-    }[apiProvider];
     properties.push({
       label: 'API provider',
-      value: providerLabel
+      value: PROVIDER_DISPLAY_NAMES[apiProvider]
     });
   }
   if (apiProvider === 'firstParty') {

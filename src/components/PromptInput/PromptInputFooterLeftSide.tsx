@@ -40,6 +40,7 @@ import { isXtermJs } from '../../ink/terminal.js';
 import { useHasSelection, useSelection } from '../../ink/hooks/use-selection.js';
 import { getGlobalConfig, saveGlobalConfig } from '../../utils/config.js';
 import { getPlatform } from '../../utils/platform.js';
+import { getPowerModeFromSettings } from '../../utils/powerMode.js';
 import { PrBadge } from '../PrBadge.js';
 
 // Dead code elimination: conditional import for proactive mode
@@ -309,6 +310,9 @@ function ModeIndicator({
     }
   }, [voiceEnabled, voiceHintUnderCap]);
   const isKillAgentsConfirmShowing = useAppState(s_7 => s_7.notifications.current?.key === 'kill-agents-confirm');
+  // Power mode chip (bronze "cheap" / gold "full power"); hidden in normal
+  // mode. Colored via the 'brand' slot, which the mode overlay tints.
+  const powerMode = useAppState(s_8 => getPowerModeFromSettings(s_8.settings));
 
   // Derive team info from teamContext (no filesystem I/O needed)
   // Match the same logic as TeamStatus to avoid trailing separator
@@ -355,6 +359,11 @@ function ModeIndicator({
           </Text>}
       </Text> : null;
 
+  // Persistent power-mode indicator (only when not in normal mode).
+  const powerModePart = powerMode !== 'normal' ? <Text color="brand" key="power-mode">
+        ◆ {powerMode === 'cheap' ? 'cheap mode' : 'full power'}
+      </Text> : null;
+
   // Build parts array - exclude BackgroundTaskStatus when we have teammate pills
   // (teammate pills get their own row)
   const parts = [
@@ -388,7 +397,7 @@ function ModeIndicator({
   if (hasTeammatePills) {
     // Don't append spinner hints when viewing a completed teammate —
     // the "esc to return to team lead" hint already replaces "esc to interrupt"
-    const otherParts = [...(modePart ? [modePart] : []), ...parts, ...(isViewingCompletedTeammate ? [] : hintParts)];
+    const otherParts = [...(powerModePart ? [powerModePart] : []), ...(modePart ? [modePart] : []), ...parts, ...(isViewingCompletedTeammate ? [] : hintParts)];
     return <Box flexDirection="column">
         <Box>
           <BackgroundTaskStatus tasksSelected={tasksSelected} isViewingTeammate={isViewingTeammate} teammateFooterIndex={teammateFooterIndex} isLeaderIdle={!isLoading} onOpenDialog={onOpenTasksDialog} />
@@ -456,13 +465,17 @@ function ModeIndicator({
   // part (e.g. the selection copy/native-select hints) grow the column
   // from 0→1 row. Always render 1 row in fullscreen; return a space when
   // empty so Yoga reserves the row without painting anything visible.
-  if (parts.length === 0 && !tasksPart && !modePart) {
+  if (parts.length === 0 && !tasksPart && !modePart && !powerModePart) {
     return isFullscreenEnvEnabled() ? <Text> </Text> : null;
   }
 
   // flexShrink=0 keeps mode + pill at natural width; the remaining parts
   // truncate at the tail as one string inside the Text wrapper.
   return <Box height={1} overflow="hidden">
+      {powerModePart && <Box flexShrink={0}>
+          {powerModePart}
+          {(modePart || tasksPart || parts.length > 0) && <Text dimColor> · </Text>}
+        </Box>}
       {modePart && <Box flexShrink={0}>
           {modePart}
           {(tasksPart || parts.length > 0) && <Text dimColor> · </Text>}

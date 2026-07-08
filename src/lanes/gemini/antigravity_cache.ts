@@ -65,6 +65,10 @@ import { createHash } from 'crypto'
 import { appendFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
+import {
+  _resetSessionVolatileFreezeForTest,
+  freezeSessionVolatileText,
+} from '../shared/volatile_freeze.js'
 
 // ─── Opt-in switch ───────────────────────────────────────────────
 //
@@ -104,7 +108,6 @@ const PAD_CHARS_PER_TOKEN = 4.6
 const PAD_SIZE_STEP_TOKENS = 500
 
 const _padBySize = new Map<number, string>()
-const _volatilePrefixBySession = new Map<string, string>()
 
 /** Deterministic inert pad sized to `tokens` (estimated). */
 export function antigravityPrefixPad(tokens: number): string {
@@ -177,16 +180,10 @@ export function freezeAntigravityVolatilePrefix(
   cacheKey: string,
   volatileText: string,
 ): string {
-  const existing = _volatilePrefixBySession.get(cacheKey)
-  if (existing !== undefined) return existing
-  if (!volatileText) return ''
-
-  _volatilePrefixBySession.set(cacheKey, volatileText)
-  if (_volatilePrefixBySession.size > 128) {
-    const oldest = _volatilePrefixBySession.keys().next().value
-    if (oldest !== undefined) _volatilePrefixBySession.delete(oldest)
-  }
-  return volatileText
+  // Implementation generalized to shared/volatile_freeze.ts — the same
+  // snapshot discipline now covers the OpenRouter lane and every Gemini path,
+  // not just Antigravity. This export stays as the Antigravity-documented name.
+  return freezeSessionVolatileText(cacheKey, volatileText)
 }
 
 // ─── Commit-window pacing (agent sessions only) ──────────────────
@@ -207,11 +204,24 @@ const DEFAULT_COMMIT_WINDOW_MS = 6_000
 const MAX_PACED_TURNS = 2
 const AGENT_SESSION_PREFIX = 'tau-agent-'
 
+// Mid-session cold-cascade damper: a full-cold request re-pays the whole
+// prompt AND its replacement write commits async (~8-22s), so a fast
+// follow-up request re-pays everything AGAIN (live transcript: a 38k-token
+// cold fired 14s after a 37k cold on the same session). Whenever usage
+// reports a full cold on a prompt big enough to commit, re-arm the
+// commit-window guard so the NEXT request waits the write out. Bounded per
+// session so a backend that refuses to cache can't throttle a whole run.
+const GUARD_MIN_PROMPT_TOKENS = 16_384
+const FULL_COLD_READ_FRACTION = 0.05
+const MAX_GUARD_REARMS = 4
+
 interface PaceState {
   /** Start of the most recent un-committed (cold) request. */
   armedAt: number
   pacedCount: number
   hitSeen: boolean
+  /** Times the guard was re-armed by an observed mid-session full cold. */
+  rearms: number
 }
 
 // Test override beats env (TAU_ANTIGRAVITY_PACING_MS) beats default.
@@ -248,17 +258,61 @@ export async function paceAntigravityAgentRequest(
   // would buy nothing but latency.
   if (!antigravityMaxCacheEnabled()) return
   if (!sessionId || !sessionId.startsWith(AGENT_SESSION_PREFIX)) return
+  await holdForCommitWindow(sessionId, signal, commitWindowMs())
+}
 
+// ─── Session-start commit-window guard (all Antigravity Gemini) ──
+//
+// Live-measured (2026-07-02 sessions): the 2nd/3rd requests of a session go
+// FULL COLD whenever they fire inside the backend's async commit window
+// (~8-22s) after the first write — each such miss re-pays the entire prompt
+// (~20-30k tokens). The guard holds those early requests until the window
+// has elapsed, then latches off for the whole session on the first observed
+// hit (steady-state turns are never held). Distinct from the opt-in
+// maxCache pacing above: no padding, no agent gating, and it never holds a
+// prompt too small to cache in the first place.
+
+// Below the ~16,384-token minimum nothing commits, so holding is pure
+// latency. 90k chars ÷ 5.5 chars/token ≈ 16.4k tokens.
+const GUARD_MIN_PROMPT_CHARS = 90_000
+
+// Commits measured at ~8-22s (and later on thinking-tier models: an agent's
+// second request 14s after the first stream ended still missed). 15s converts
+// most misses while capping the worst added latency (2 paced turns max) at
+// ~30s per pacing episode — and a hold only ever happens when the next
+// request fires faster than the window, i.e. agent loops, not humans typing.
+// TAU_ANTIGRAVITY_PACING_MS overrides, TAU_ANTIGRAVITY_NO_PACING=1 disables.
+const GUARD_COMMIT_WINDOW_MS = 15_000
+
+export async function guardAntigravityCommitWindow(
+  sessionId: string | undefined,
+  signal: AbortSignal | undefined,
+  promptChars: number,
+): Promise<void> {
+  if (process.env.TAU_ANTIGRAVITY_NO_PACING === '1') return
+  if (!sessionId) return
+  if (promptChars < GUARD_MIN_PROMPT_CHARS) return
+  const window = _commitWindowOverride !== undefined || process.env.TAU_ANTIGRAVITY_PACING_MS
+    ? commitWindowMs()
+    : GUARD_COMMIT_WINDOW_MS
+  await holdForCommitWindow(sessionId, signal, window)
+}
+
+async function holdForCommitWindow(
+  sessionId: string,
+  signal: AbortSignal | undefined,
+  windowMs: number,
+): Promise<void> {
   const now = Date.now()
   const state = _agentPace.get(sessionId)
   if (!state) {
-    _agentPace.set(sessionId, { armedAt: now, pacedCount: 0, hitSeen: false })
+    _agentPace.set(sessionId, { armedAt: now, pacedCount: 0, hitSeen: false, rearms: 0 })
     _prunePaceMap()
     return
   }
   if (state.hitSeen || state.pacedCount >= MAX_PACED_TURNS) return
 
-  const waitMs = state.armedAt + commitWindowMs() - now
+  const waitMs = state.armedAt + windowMs - now
   // Natural cadence already cleared the window — the prior write has
   // committed (or never will); don't burn a paced turn on it.
   if (waitMs <= 0) return
@@ -314,10 +368,70 @@ export function recordAntigravityCacheRead(
       }
     }
   }
-  if (!sessionId || cacheReadTokens <= 0 || promptTokens <= 0) return
+  if (!sessionId || promptTokens <= 0) return
+
+  // Full cold on a committable prompt (reads ~0 while the prompt is over the
+  // backend's 16,384-token cache minimum): whatever caused it — endpoint hop,
+  // replica miss, TTL expiry, byte churn — this request just re-paid the
+  // whole prefix and its write is now in flight. Re-arm the guard so the
+  // next request waits out the commit window instead of cascading a second
+  // full-price miss. Partial reads (quantum lag) are NOT colds: the entry
+  // exists, the next request will read it, so no hold is warranted.
+  if (
+    cacheReadTokens < promptTokens * FULL_COLD_READ_FRACTION
+    && promptTokens >= GUARD_MIN_PROMPT_TOKENS
+  ) {
+    const state = _agentPace.get(sessionId)
+    if (!state) {
+      _agentPace.set(sessionId, { armedAt: Date.now(), pacedCount: 0, hitSeen: false, rearms: 0 })
+      _prunePaceMap()
+      return
+    }
+    if (state.hitSeen) {
+      if (state.rearms >= MAX_GUARD_REARMS) return
+      state.rearms++
+      state.hitSeen = false
+      state.pacedCount = 0
+    }
+    // Usage arrives at stream end ≈ when the backend queues the write, so
+    // pacing from here tracks the real commit window better than the
+    // request's start time did (long generations under-waited before).
+    state.armedAt = Date.now()
+    return
+  }
+
+  if (cacheReadTokens <= 0) return
   if (cacheReadTokens < promptTokens * 0.7) return
   const state = _agentPace.get(sessionId)
   if (state) state.hitSeen = true
+}
+
+/**
+ * TAU_CACHE_DEBUG=1: append an endpoint-routing event (which host served,
+ * hops between hosts, signature strips) to <tmpdir>/tau-cache-debug.jsonl so
+ * full-cold turns in a session can be joined against the exact routing that
+ * produced them instead of inferred from usage numbers alone.
+ */
+export function writeAntigravityEndpointDebugEvent(
+  sessionId: string | undefined,
+  event: string,
+  detail: Record<string, unknown> = {},
+): void {
+  if (!process.env.TAU_CACHE_DEBUG) return
+  try {
+    appendFileSync(
+      join(tmpdir(), 'tau-cache-debug.jsonl'),
+      JSON.stringify({
+        ts: new Date().toISOString(),
+        kind: 'endpoint',
+        event,
+        sessionId,
+        ...detail,
+      }) + '\n',
+    )
+  } catch {
+    // Diagnostics must never break the request path.
+  }
 }
 
 // ─── Diagnostics ─────────────────────────────────────────────────
@@ -326,6 +440,8 @@ interface DebugSnapshot {
   system: string
   tools: string
   blocks: string[]
+  /** Per-block part descriptors (kind, length, hash, head) for forensics. */
+  previews?: string[][]
 }
 
 /**
@@ -392,18 +508,33 @@ export function writeAntigravityCacheDebugEntry(
     const contents = Array.isArray(request.contents)
       ? (request.contents as unknown[])
       : []
+    // Per-part descriptors so a "block rewritten" verdict names WHICH part
+    // changed and how (kind, byte length, hash, head) — without them a
+    // rewrite deep inside a merged user block is unattributable.
+    const partsOf = (value: unknown): string[] => {
+      const parts = Array.isArray((value as any)?.parts)
+        ? ((value as any).parts as Array<Record<string, any>>)
+        : []
+      return parts.map(p => {
+        if (typeof p.text === 'string') {
+          return `text len=${p.text.length} h=${h(p.text)} "${p.text.slice(0, 48).replace(/\s+/g, ' ')}"`
+        }
+        if (p.functionCall?.name) return `functionCall ${p.functionCall.name} h=${h(p)}`
+        if (p.functionResponse?.name) return `functionResponse ${p.functionResponse.name} h=${h(p)}`
+        return `part h=${h(p)}`
+      })
+    }
     const snapshot: DebugSnapshot = {
       system: h(request.systemInstruction),
       tools: h(request.tools),
       blocks: contents.map(h),
+      previews: contents.map(partsOf),
     }
     const key = sessionId ?? '<no-session>'
-    const verdict = diagnoseAntigravityCacheBreak(
-      _lastDebugSnapshot.get(key),
-      snapshot,
-    )
+    const prev = _lastDebugSnapshot.get(key)
+    const verdict = diagnoseAntigravityCacheBreak(prev, snapshot)
     _lastDebugSnapshot.set(key, snapshot)
-    const entry = {
+    const entry: Record<string, unknown> = {
       ts: new Date().toISOString(),
       model,
       sessionId,
@@ -414,6 +545,19 @@ export function writeAntigravityCacheDebugEntry(
       nContents: contents.length,
       blocks: snapshot.blocks,
       bytes: JSON.stringify(request).length,
+    }
+    if (prev && verdict.startsWith('BREAK')) {
+      const shared = Math.min(prev.blocks.length, snapshot.blocks.length)
+      for (let i = 0; i < shared; i++) {
+        if (prev.blocks[i] !== snapshot.blocks[i]) {
+          entry.rewritten = {
+            index: i,
+            before: prev.previews?.[i] ?? [],
+            after: snapshot.previews?.[i] ?? [],
+          }
+          break
+        }
+      }
     }
     appendFileSync(
       join(tmpdir(), 'tau-cache-debug.jsonl'),
@@ -429,7 +573,7 @@ export function writeAntigravityCacheDebugEntry(
 export function _resetAntigravityCacheStateForTest(): void {
   _agentPace.clear()
   _lastDebugSnapshot.clear()
-  _volatilePrefixBySession.clear()
+  _resetSessionVolatileFreezeForTest()
   _commitWindowOverride = undefined
 }
 
@@ -439,6 +583,6 @@ export function _setAntigravityCommitWindowForTest(ms: number): void {
 
 export function _getAntigravityPaceStateForTest(
   sessionId: string,
-): { armedAt: number; pacedCount: number; hitSeen: boolean } | undefined {
+): { armedAt: number; pacedCount: number; hitSeen: boolean; rearms: number } | undefined {
   return _agentPace.get(sessionId)
 }

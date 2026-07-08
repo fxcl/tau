@@ -7,61 +7,9 @@
  * this transformer keeps requests conservative.
  */
 
-import type { ModelInfo } from '../../../services/api/providers/base_provider.js'
 import type { Transformer, TransformContext } from './base.js'
 import type { OpenAIChatRequest } from './shared_types.js'
-
-const MINIMAX_STATIC_MODELS: ModelInfo[] = [
-  {
-    id: 'MiniMax-M2.7',
-    name: 'MiniMax-M2.7',
-    contextWindow: 204_800,
-    supportsToolCalling: true,
-    tags: ['recommended', 'reasoning'],
-  },
-  {
-    id: 'MiniMax-M2.7-highspeed',
-    name: 'MiniMax-M2.7 High Speed',
-    contextWindow: 204_800,
-    supportsToolCalling: true,
-    tags: ['fast', 'reasoning'],
-  },
-  {
-    id: 'MiniMax-M2.5',
-    name: 'MiniMax-M2.5',
-    contextWindow: 204_800,
-    supportsToolCalling: true,
-    tags: ['reasoning'],
-  },
-  {
-    id: 'MiniMax-M2.5-highspeed',
-    name: 'MiniMax-M2.5 High Speed',
-    contextWindow: 204_800,
-    supportsToolCalling: true,
-    tags: ['fast', 'reasoning'],
-  },
-  {
-    id: 'MiniMax-M2.1',
-    name: 'MiniMax-M2.1',
-    contextWindow: 204_800,
-    supportsToolCalling: true,
-    tags: ['reasoning'],
-  },
-  {
-    id: 'MiniMax-M2.1-highspeed',
-    name: 'MiniMax-M2.1 High Speed',
-    contextWindow: 204_800,
-    supportsToolCalling: true,
-    tags: ['fast', 'reasoning'],
-  },
-  {
-    id: 'MiniMax-M2',
-    name: 'MiniMax-M2',
-    contextWindow: 204_800,
-    supportsToolCalling: true,
-    tags: ['reasoning'],
-  },
-]
+import { filterMiniMaxModelCatalog } from '../../../utils/model/minimaxCatalog.js'
 
 export const minimaxTransformer: Transformer = {
   id: 'minimax',
@@ -70,29 +18,12 @@ export const minimaxTransformer: Transformer = {
 
   supportsStrictMode: () => false,
 
-  staticCatalog() {
-    return MINIMAX_STATIC_MODELS.map(model => ({ ...model }))
-  },
-
   preferLiveModelCatalog() {
     return true
   },
 
   filterModelCatalog(models) {
-    const seen = new Set<string>()
-    const filtered = models.flatMap((model) => {
-      const id = model.id.trim()
-      if (!isMiniMaxTextModel(id) || seen.has(id)) return []
-      seen.add(id)
-      return [{
-        id,
-        name: model.name ?? labelMiniMaxModel(id),
-        contextWindow: 204_800,
-        supportsToolCalling: true,
-        tags: tagsForMiniMaxModel(id),
-      } satisfies ModelInfo]
-    })
-    return filtered.length > 0 ? filtered : MINIMAX_STATIC_MODELS.map(model => ({ ...model }))
+    return filterMiniMaxModelCatalog(models)
   },
 
   clampMaxTokens(requested: number): number {
@@ -165,30 +96,4 @@ export const minimaxTransformer: Transformer = {
     const k = ['m2.', 'm25', 'm21'].some(s => id.includes(s)) ? 40 : 20
     return { temperature: 1.0, top_p: 0.95, top_k: k }
   },
-}
-
-function isMiniMaxTextModel(id: string): boolean {
-  const lower = id.toLowerCase()
-  return (
-    lower.startsWith('minimax-m') &&
-    !lower.includes('speech') &&
-    !lower.includes('audio') &&
-    !lower.includes('tts') &&
-    !lower.includes('voice') &&
-    !lower.includes('image') &&
-    !lower.includes('video') &&
-    !lower.includes('music') &&
-    !lower.includes('embedding')
-  )
-}
-
-function labelMiniMaxModel(id: string): string {
-  return id.replace(/-highspeed$/i, ' High Speed')
-}
-
-function tagsForMiniMaxModel(id: string): readonly string[] {
-  const tags = ['reasoning']
-  if (id.toLowerCase().includes('highspeed')) tags.push('fast')
-  if (id === 'MiniMax-M2.7') tags.push('recommended')
-  return tags
 }

@@ -26,6 +26,7 @@ import { TODO_WRITE_TOOL_NAME } from '../tools/TodoWriteTool/constants.js'
 import { TASK_CREATE_TOOL_NAME } from '../tools/TaskCreateTool/constants.js'
 import { TASK_UPDATE_TOOL_NAME } from '../tools/TaskUpdateTool/constants.js'
 import { BASH_TOOL_NAME } from '../tools/BashTool/toolName.js'
+import { LSP_TOOL_NAME } from '../tools/LSPTool/prompt.js'
 import { SKILL_TOOL_NAME } from '../tools/SkillTool/constants.js'
 import type { TodoList } from './todo/types.js'
 import {
@@ -63,7 +64,8 @@ import {
   isValidImagePaste,
 } from 'src/types/textInputTypes.js'
 import { randomUUID, type UUID } from 'crypto'
-import { getSettings_DEPRECATED } from './settings/settings.js'
+import { getInitialSettings, getSettings_DEPRECATED } from './settings/settings.js'
+import { getPowerModeFromSettings, type PowerMode } from './powerMode.js'
 import { getSnippetForTwoFileDiff } from 'src/tools/FileEditTool/utils.js'
 import type {
   ContentBlockParam,
@@ -159,9 +161,11 @@ import {
   getKairosActive,
 } from '../bootstrap/state.js'
 import type { QuerySource } from '../constants/querySource.js'
+import { getAPIProvider } from './model/providers.js'
 import {
   getDeferredToolsDelta,
   isDeferredToolsDeltaEnabled,
+  isNativeLaneToolSearchEnabled,
   isToolSearchEnabledOptimistic,
   isToolSearchToolAvailable,
   modelSupportsToolReference,
@@ -535,6 +539,18 @@ export type Attachment =
       isInitial: boolean
     }
   | {
+      /**
+       * Announces power-mode transitions that change what the model may use.
+       * Emitted when the effective mode diverges from the last announced one
+       * (reconstructed from the transcript, default 'normal') and the
+       * transition involves 'cheap' — entering cheap retracts every
+       * skills/agents/MCP listing already in context; leaving cheap
+       * reinstates them.
+       */
+      type: 'power_mode_change'
+      mode: PowerMode
+    }
+  | {
       type: 'skill_discovery'
       skills: { name: string; description: string; shortId?: string }[]
       signal: DiscoverySignal
@@ -869,6 +885,9 @@ export async function getAttachments(
           messages,
         ),
       ),
+    ),
+    maybe('power_mode_change', () =>
+      Promise.resolve(getPowerModeChangeAttachment(messages)),
     ),
     ...(feature('BUDDY')
       ? [
@@ -1503,6 +1522,16 @@ export function getDeferredToolsDeltaAttachment(
   if (!isToolSearchEnabledOptimistic()) return []
   if (!modelSupportsToolReference(model)) return []
   if (!isToolSearchToolAvailable(tools)) return []
+  // Gemini lane with lazy tools declined for this model (Antigravity): every
+  // schema ships inline and ToolSearch is stripped from the request, so
+  // announcing "available via ToolSearch" would point at a tool that isn't
+  // there. Openai-compat native lanes have no per-model opt-out — unchanged.
+  if (
+    getAPIProvider() === 'gemini' &&
+    !isNativeLaneToolSearchEnabled(model)
+  ) {
+    return []
+  }
   const delta = getDeferredToolsDelta(tools, messages ?? [], scanContext)
   if (!delta) return []
   return [{ type: 'deferred_tools_delta', ...delta }]
@@ -1598,6 +1627,15 @@ export function getMcpInstructionsDeltaAttachment(
 ): Attachment[] {
   if (!isMcpInstructionsDeltaEnabled()) return []
 
+  // Cheap power mode hides MCP from the model. Servers connected in an
+  // earlier mode may still be open (kept warm for switch-back); treating the
+  // connected set as empty blocks new instruction announcements AND emits
+  // removals for anything already announced in the transcript.
+  const effectiveMcpClients =
+    getPowerModeFromSettings(getInitialSettings()) === 'cheap'
+      ? []
+      : mcpClients
+
   // The chrome ToolSearch hint is client-authored and ToolSearch-conditional;
   // actual server `instructions` are unconditional. Decide the chrome part
   // here, pass it into the pure diff as a synthesized entry.
@@ -1613,9 +1651,43 @@ export function getMcpInstructionsDeltaAttachment(
     })
   }
 
-  const delta = getMcpInstructionsDelta(mcpClients, messages ?? [], clientSide)
+  const delta = getMcpInstructionsDelta(
+    effectiveMcpClients,
+    messages ?? [],
+    clientSide,
+  )
   if (!delta) return []
   return [{ type: 'mcp_instructions_delta', ...delta }]
+}
+
+/**
+ * Announce power-mode transitions that change model-visible capabilities.
+ *
+ * The listings the model sees (skills, agent types, MCP instructions) are
+ * append-only in the transcript; entering cheap mode removes the underlying
+ * tools but can't unsay what was already announced. This attachment closes
+ * that gap: it fires once per effective transition (reconstructed from prior
+ * power_mode_change attachments, so it survives resume and re-fires after
+ * compaction eats it — which is desirable, the constraint gets restated).
+ *
+ * Only transitions involving 'cheap' are announced. normal↔full differ only
+ * in optional-tool toggles, which the tool list itself communicates; a fresh
+ * session that starts in cheap announces on turn 0 so the model never claims
+ * skills/agents/MCP it doesn't have.
+ */
+export function getPowerModeChangeAttachment(
+  messages: Message[] | undefined,
+): Attachment[] {
+  const current = getPowerModeFromSettings(getInitialSettings())
+  let announced: PowerMode = 'normal'
+  for (const msg of messages ?? []) {
+    if (msg.type !== 'attachment') continue
+    if (msg.attachment.type !== 'power_mode_change') continue
+    announced = msg.attachment.mode
+  }
+  if (current === announced) return []
+  if (current !== 'cheap' && announced !== 'cheap') return []
+  return [{ type: 'power_mode_change', mode: current }]
 }
 
 function getCriticalSystemReminderAttachment(
@@ -2917,9 +2989,10 @@ async function getDiagnosticAttachments(
 async function getLSPDiagnosticAttachments(
   toolUseContext: ToolUseContext,
 ): Promise<Attachment[]> {
-  // LSP diagnostics are only useful if the agent has the Bash tool to act on them
+  // LSP diagnostics are only useful when LSP is visible and Bash can act on them.
   if (
-    !toolUseContext.options.tools.some(t => toolMatchesName(t, BASH_TOOL_NAME))
+    !toolUseContext.options.tools.some(t => toolMatchesName(t, BASH_TOOL_NAME)) ||
+    !toolUseContext.options.tools.some(t => toolMatchesName(t, LSP_TOOL_NAME))
   ) {
     return []
   }

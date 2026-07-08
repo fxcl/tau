@@ -44,6 +44,7 @@ export function modelSupportsEffort(model: string): boolean {
     m.includes('opus-4-8')
     || m.includes('opus-4-7')
     || m.includes('opus-4-6')
+    || m.includes('sonnet-5')
     || m.includes('sonnet-4-6')
   ) {
     return true
@@ -74,6 +75,7 @@ export function modelSupportsMaxEffort(model: string): boolean {
     normalized.includes('opus-4-8')
     || normalized.includes('opus-4-7')
     || normalized.includes('opus-4-6')
+    || normalized.includes('sonnet-5')
     || normalized.includes('sonnet-4-6')
   ) {
     return true
@@ -87,7 +89,11 @@ export function modelSupportsMaxEffort(model: string): boolean {
 // @[MODEL LAUNCH]: Add the new model to the allowlist if it supports 'xhigh' effort.
 export function modelSupportsXHighEffort(model: string): boolean {
   const normalized = model.toLowerCase()
-  if (normalized.includes('opus-4-8') || normalized.includes('opus-4-7')) {
+  if (
+    normalized.includes('opus-4-8')
+    || normalized.includes('opus-4-7')
+    || normalized.includes('sonnet-5')
+  ) {
     return true
   }
   if (process.env.USER_TYPE === 'ant' && resolveAntModel(model)) {
@@ -329,7 +335,7 @@ export function getEffortLevelDescription(level: EffortLevel): string {
     case 'high':
       return 'Comprehensive implementation with extensive testing and documentation'
     case 'xhigh':
-      return 'Extra high reasoning for complex Opus work'
+      return 'Extra high reasoning for supported Claude models'
     case 'max':
       return 'Maximum capability with deepest reasoning'
     case 'ultracode':

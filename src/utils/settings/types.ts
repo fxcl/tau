@@ -734,6 +734,19 @@ export const SettingsSchema = lazySchema(() =>
         .describe(
           'When true, fast mode does not persist across sessions. Each session starts with fast mode off.',
         ),
+      disabledPrebuiltTools: z
+        .array(z.string())
+        .optional()
+        .describe(
+          'Optional Tau prebuilt tool toggles disabled by /tools. Only the allowlisted optional tools are honored; basic agent tools are ignored.',
+        ),
+      powerMode: z
+        .enum(['cheap', 'normal', 'full'])
+        .optional()
+        .catch(undefined)
+        .describe(
+          'Power mode set by /mode. cheap = core tools only (optional tools, skills, agents, plugins, MCP, and LSP all off); normal = default behavior; full = every optional tool forced on. Absent means normal.',
+        ),
       promptSuggestionEnabled: z
         .boolean()
         .optional()

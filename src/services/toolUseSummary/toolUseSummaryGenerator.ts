@@ -10,6 +10,7 @@ import { toError } from '../../utils/errors.js'
 import { logError } from '../../utils/log.js'
 import { jsonStringify } from '../../utils/slowOperations.js'
 import { asSystemPrompt } from '../../utils/systemPromptType.js'
+import { areNonEssentialModelCallsDisabled } from '../../utils/sideQueries.js'
 import { queryHaiku } from '../api/claude.js'
 
 const TOOL_USE_SUMMARY_SYSTEM_PROMPT = `Write a short summary label describing what these tool calls accomplished. It appears as a single-line row in a mobile app and truncates around 30 characters, so think git-commit-subject, not sentence.
@@ -49,6 +50,11 @@ export async function generateToolUseSummary({
   lastAssistantText,
 }: GenerateToolUseSummaryParams): Promise<string | null> {
   if (tools.length === 0) {
+    return null
+  }
+  // Optional background call (fires after tool batches — the most frequent
+  // side query) — suppressed by the side-query kill switch.
+  if (areNonEssentialModelCallsDisabled()) {
     return null
   }
 

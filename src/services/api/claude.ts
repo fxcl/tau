@@ -188,7 +188,9 @@ import {
 import {
   extractDiscoveredToolNames,
   isDeferredToolsDeltaEnabled,
+  isNativeLaneToolSearchEnabled,
   isToolSearchEnabled,
+  isToolSearchToolAvailable,
 } from 'src/utils/toolSearch.js'
 import { API_MAX_MEDIA_PER_REQUEST } from '../../constants/apiLimits.js'
 import { ADVISOR_BETA_HEADER } from '../../constants/betas.js'
@@ -1564,10 +1566,11 @@ async function* queryModel(
     options.agents,
     'query',
   )
+  let useNativeLaneToolSearch = isNativeLaneToolSearchEnabled(options.model)
 
   // Precompute once — isDeferredTool does 2 GrowthBook lookups per call
   const deferredToolNames = new Set<string>()
-  if (useToolSearch) {
+  if (useToolSearch || useNativeLaneToolSearch) {
     for (const t of tools) {
       if (isDeferredTool(t)) deferredToolNames.add(t.name)
     }
@@ -1586,12 +1589,28 @@ async function* queryModel(
     )
     useToolSearch = false
   }
+  if (useNativeLaneToolSearch && !isToolSearchToolAvailable(tools)) {
+    logForDebugging(
+      'Native lane lazy tools disabled: ToolSearchTool is not available',
+    )
+    useNativeLaneToolSearch = false
+  }
+  if (
+    useNativeLaneToolSearch &&
+    deferredToolNames.size === 0 &&
+    !options.hasPendingMcpServers
+  ) {
+    logForDebugging(
+      'Native lane lazy tools disabled: no deferred tools available to search',
+    )
+    useNativeLaneToolSearch = false
+  }
 
   // Filter out ToolSearchTool if tool search is not enabled for this model
   // ToolSearchTool returns tool_reference blocks which unsupported models can't handle
   let filteredTools: Tools
 
-  if (useToolSearch) {
+  if (useToolSearch || useNativeLaneToolSearch) {
     // Dynamic tool loading: Only include deferred tools that have been discovered
     // via tool_reference blocks in the message history. This eliminates the need
     // to predeclare all deferred tools upfront and removes limits on tool quantity.
@@ -1721,7 +1740,7 @@ async function* queryModel(
   // Note: For assistant messages, normalizeMessagesForAPI already normalized the
   // tool inputs, so stripCallerFieldFromAssistantMessage only needs to remove the
   // 'caller' field (not re-normalize inputs).
-  if (!useToolSearch) {
+  if (!useToolSearch && !useNativeLaneToolSearch) {
     messagesForAPI = messagesForAPI.map(msg => {
       switch (msg.type) {
         case 'user':
@@ -1768,7 +1787,10 @@ async function* queryModel(
   // When the delta attachment is enabled, deferred tools are announced
   // via persisted deferred_tools_delta attachments instead of this
   // ephemeral prepend (which busts cache whenever the pool changes).
-  if (useToolSearch && !isDeferredToolsDeltaEnabled()) {
+  if (
+    (useToolSearch || useNativeLaneToolSearch) &&
+    !isDeferredToolsDeltaEnabled()
+  ) {
     const deferredToolList = tools
       .filter(t => deferredToolNames.has(t.name))
       .map(formatDeferredToolLine)

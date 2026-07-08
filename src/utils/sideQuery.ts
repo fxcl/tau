@@ -1,6 +1,7 @@
 import type Anthropic from '@anthropic-ai/sdk'
 import type { BetaToolUnion } from '@anthropic-ai/sdk/resources/beta/messages.js'
 import {
+  getSessionId,
   getLastApiCompletionTimestamp,
   setLastApiCompletionTimestamp,
 } from '../bootstrap/state.js'
@@ -13,10 +14,12 @@ import {
 import { logEvent } from '../services/analytics/index.js'
 import type { AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS } from '../services/analytics/metadata.js'
 import { getAPIMetadata } from '../services/api/claude.js'
+import { resolveProviderRequestSessionId } from '../services/api/cacheAffinity.js'
 import { getAnthropicClient } from '../services/api/client.js'
 import { getModelBetas, modelSupportsStructuredOutputs } from './betas.js'
 import { computeFingerprint } from './fingerprint.js'
 import { normalizeModelStringForAPI } from './model/model.js'
+import { getAPIProvider } from './model/providers.js'
 
 type MessageParam = Anthropic.MessageParam
 type TextBlockParam = Anthropic.TextBlockParam
@@ -124,7 +127,7 @@ export async function sideQuery(opts: SideQueryOptions): Promise<BetaMessage> {
   const client = await getAnthropicClient({
     maxRetries,
     model,
-    source: 'side_query',
+    source: opts.querySource,
   })
   const betas = [...getModelBetas(model)]
   // Add structured-outputs beta if using output_format and provider supports it
@@ -177,6 +180,11 @@ export async function sideQuery(opts: SideQueryOptions): Promise<BetaMessage> {
   }
 
   const normalizedModel = normalizeModelStringForAPI(model)
+  const providerSessionId = resolveProviderRequestSessionId({
+    provider: getAPIProvider(),
+    rootSessionId: getSessionId(),
+    querySource: opts.querySource,
+  })
   const start = Date.now()
   // biome-ignore lint/plugin: this IS the wrapper that handles OAuth attribution
   const response = await client.beta.messages.create(
@@ -193,6 +201,7 @@ export async function sideQuery(opts: SideQueryOptions): Promise<BetaMessage> {
       ...(thinkingConfig && { thinking: thinkingConfig }),
       ...(betas.length > 0 && { betas }),
       metadata: getAPIMetadata(),
+      ...(providerSessionId && { sessionId: providerSessionId }),
     },
     { signal },
   )

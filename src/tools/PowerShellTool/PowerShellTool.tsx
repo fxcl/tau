@@ -934,6 +934,24 @@ async function* runPowerShellCommand({
   // When explicitly requested via run_in_background, always honor the request
   // regardless of the command type (isAutobackgroundingAllowed only applies to automatic backgrounding)
   if (run_in_background === true && !isBackgroundTasksDisabled) {
+    // A command that already finished before it could be backgrounded never
+    // actually ran in the background: exec() returns createFailedCommand for a
+    // pre-spawn failure (missing workdir / deleted cwd) or createAbortedCommand
+    // for an abort, both already 'completed'/'killed' with no output file
+    // created. Registering it as a background task would hand back a phantom
+    // task ID and later emit a completion <task-notification> pointing at a
+    // nonexistent .output file — which TaskOutput and ToolOutputRetrieve then
+    // both fail to read. Surface the failure inline instead, exactly like the
+    // foreground path (a real spawn is still 'running' here, so it backgrounds
+    // normally).
+    if (shellCommand.status !== 'running') {
+      const result = await resultPromise;
+      shellCommand.cleanup();
+      if (result.preSpawnError) {
+        throw new Error(result.preSpawnError);
+      }
+      return result;
+    }
     const shellId = await spawnBackgroundTask();
     logEvent('tengu_powershell_command_explicitly_backgrounded', {
       command_type: getCommandTypeForLogging(command)

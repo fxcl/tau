@@ -31,6 +31,15 @@ import {
   VOICE_CONVERSATION_MODELS,
   VOICE_CONVERSATION_PROVIDER,
 } from '../../voice/voiceConversation.js'
+import {
+  CLINE_EFFORT_LEVELS,
+  encodeClineEffortVariant,
+  getClineEffort,
+  getClineEffortLabel,
+  parseClineEffortVariant,
+  type ClineEffort,
+} from './clineThinking.js'
+import { isClinePassProvider } from './clinePassCatalog.js'
 
 export type BrowsableModelProvider =
   | APIProvider
@@ -119,6 +128,12 @@ function normalizeProviderQueryToken(
     command_code: 'commandcode',
     cmd: 'commandcode',
     cmdcode: 'commandcode',
+    clineauth: 'cline',
+    'cline-auth': 'cline',
+    cline_auth: 'cline',
+    clinepass: 'clinepass',
+    'cline-pass': 'clinepass',
+    cline_pass: 'clinepass',
   }
   if (alias[normalized]) {
     return alias[normalized]
@@ -196,6 +211,7 @@ export async function loadProviderModels(
   if ([
     'cursor',
     'cline',
+    'clinepass',
     'glm',
     'moonshot',
     'minimax',
@@ -275,7 +291,7 @@ const ANTHROPIC_STANDARD_EFFORTS = [
   'high',
   'max',
 ] as const satisfies readonly EffortLevel[]
-const ANTHROPIC_OPUS_EFFORTS = [
+const ANTHROPIC_EXTENDED_EFFORTS = [
   'low',
   'medium',
   'high',
@@ -305,6 +321,13 @@ const ANTHROPIC_MODELS: readonly AnthropicModelInfo[] = [
     contextWindow: 1_000_000,
   },
   {
+    id: 'claude-sonnet-5',
+    name: 'Claude Sonnet 5',
+    tags: ['reasoning'],
+    effortLevels: ANTHROPIC_EXTENDED_EFFORTS,
+    defaultEffort: 'high',
+  },
+  {
     id: 'claude-sonnet-4-6',
     name: 'Claude Sonnet 4.6',
     tags: ['reasoning'],
@@ -321,6 +344,7 @@ const ANTHROPIC_MODELS: readonly AnthropicModelInfo[] = [
 export type ProviderModelSelection = {
   modelId: string
   effort?: EffortLevel
+  clineEffort?: ClineEffort
 }
 
 function encodeAnthropicEffortVariant(
@@ -338,6 +362,14 @@ export function resolveProviderModelSelection(
   provider: BrowsableModelProvider,
   selectedModelId: string,
 ): ProviderModelSelection {
+  if (isClinePassProvider(provider)) {
+    const parsed = parseClineEffortVariant(selectedModelId)
+    return {
+      modelId: parsed.modelId,
+      ...(parsed.effort ? { clineEffort: parsed.effort } : {}),
+    }
+  }
+
   if (provider !== 'firstParty') {
     return { modelId: selectedModelId }
   }
@@ -416,6 +448,10 @@ export async function loadProviderModelSections(
 
   const models = await loadProviderModels(provider)
 
+  if (isClinePassProvider(provider)) {
+    return buildClinePassSections(models)
+  }
+
   if (provider === 'openrouter' || provider === 'nim' || provider === 'modelrouter' || provider === 'vercel' || provider === 'requesty' || provider === 'opencode' || provider === 'commandcode') {
     return buildUpstreamProviderSections(provider, models)
   }
@@ -443,7 +479,9 @@ export async function loadProviderModelSections(
     if (other.length > 0) {
       sections.push({ id: 'other', title: 'Other models', models: other })
     }
-    return sections.length > 0 ? sections : [{ id: 'all', title: 'OpenAI models', models: models.map(m => ({ ...m })) }]
+    return sections.length > 0
+      ? sections
+      : [{ id: 'all', title: 'OpenAI models', models: models.map(toProviderSectionedModel) }]
   }
 
   return [
@@ -507,6 +545,39 @@ function toAnthropicSectionedModel(model: AnthropicModelInfo): SectionedModelInf
   }
 }
 
+function buildClinePassSections(models: readonly ModelInfo[]): ProviderModelSection[] {
+  return [
+    {
+      id: 'cline-pass',
+      title: 'Cline Pass models  <- -> thinking',
+      accent: 'cloud',
+      models: models.map(toClinePassSectionedModel),
+    },
+  ]
+}
+
+function toClinePassSectionedModel(model: ModelInfo): SectionedModelInfo {
+  const currentEffort = getClineEffort(model.id)
+  const defaultEffort = CLINE_EFFORT_LEVELS.includes(currentEffort)
+    ? currentEffort
+    : 'none'
+  const modelName = model.name && model.name !== model.id ? model.name : model.id
+
+  return {
+    ...model,
+    tags: mergeModelTags(pickKnownModelTags(model), ['thinking', 'pro'] as const),
+    defaultVariantId: encodeClineEffortVariant(model.id, defaultEffort),
+    variants: CLINE_EFFORT_LEVELS.map(effort => ({
+      id: encodeClineEffortVariant(model.id, effort),
+      name: `${modelName} (${getClineEffortLabel(effort)} thinking)`,
+      label: getClineEffortLabel(effort),
+      tags: effort === 'none'
+        ? (['pro'] as const)
+        : (['thinking', 'pro'] as const),
+    })),
+  }
+}
+
 function buildCursorSections(): ProviderModelSection[] {
   const buckets: Record<CursorModelSection, SectionedModelInfo[]> = {
     recommended: [],
@@ -521,7 +592,7 @@ function buildCursorSections(): ProviderModelSection[] {
   }
 
   return CURSOR_SECTION_ORDER
-    .map(section => ({
+    .map((section): ProviderModelSection => ({
       id: `cursor-${section}`,
       title: CURSOR_SECTION_TITLES[section],
       accent: section === 'openai' ? 'cloud' : undefined,

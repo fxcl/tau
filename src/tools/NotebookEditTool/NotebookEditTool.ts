@@ -1,5 +1,5 @@
 import { feature } from 'bun:bundle'
-import { extname, isAbsolute, resolve } from 'path'
+import { extname } from 'path'
 import {
   fileHistoryEnabled,
   fileHistoryTrackEdit,
@@ -7,13 +7,13 @@ import {
 import { z } from 'zod/v4'
 import { buildTool, type ToolDef, type ToolUseContext } from '../../Tool.js'
 import type { NotebookCell, NotebookContent } from '../../types/notebook.js'
-import { getCwd } from '../../utils/cwd.js'
 import { isENOENT } from '../../utils/errors.js'
 import { getFileModificationTime, writeTextContent } from '../../utils/file.js'
 import { readFileSyncWithMetadata } from '../../utils/fileRead.js'
 import { safeParseJSON } from '../../utils/json.js'
 import { lazySchema } from '../../utils/lazySchema.js'
-import { parseCellId } from '../../utils/notebook.js'
+import { parseCellId } from '../../utils/notebookCellId.js'
+import { expandPath } from '../../utils/path.js'
 import { checkWritePermissionForTool } from '../../utils/permissions/filesystem.js'
 import type { PermissionDecision } from '../../utils/permissions/PermissionResult.js'
 import { jsonParse, jsonStringify } from '../../utils/slowOperations.js'
@@ -38,14 +38,18 @@ export const inputSchema = lazySchema(() =>
       .string()
       .optional()
       .describe(
-        'The ID of the cell to edit. When inserting a new cell, the new cell will be inserted after the cell with this ID, or at the beginning if not specified.',
+        'The actual cell ID from the notebook Read output, for example "cell-0". Required for replace/delete. When inserting, the new cell is inserted after this cell, or at the beginning if omitted.',
       ),
-    new_source: z.string().describe('The new source for the cell'),
+    new_source: z
+      .string()
+      .describe(
+        'The new source for the cell. Required for all modes; use an empty string for delete.',
+      ),
     cell_type: z
       .enum(['code', 'markdown'])
       .optional()
       .describe(
-        'The type of the cell (code or markdown). If not specified, it defaults to the current cell type. If using edit_mode=insert, this is required.',
+        'The type of the cell (code or markdown). If not specified, it defaults to the current cell type. Required when edit_mode=insert.',
       ),
     edit_mode: z
       .enum(['replace', 'insert', 'delete'])
@@ -122,6 +126,14 @@ export const NotebookEditTool = buildTool({
   getPath(input): string {
     return input.notebook_path
   },
+  backfillObservableInput(input) {
+    // Expand so hook allowlists can't be bypassed via ~/relative paths, and so
+    // the observed path matches the canonical spelling used everywhere else
+    // (and the readFileState key the Read tool stored under).
+    if (typeof input.notebook_path === 'string') {
+      input.notebook_path = expandPath(input.notebook_path)
+    }
+  },
   async checkPermissions(input, context): Promise<PermissionDecision> {
     const appState = context.getAppState()
     return checkWritePermissionForTool(
@@ -177,9 +189,11 @@ export const NotebookEditTool = buildTool({
     { notebook_path, cell_type, cell_id, edit_mode = 'replace' },
     toolUseContext: ToolUseContext,
   ) {
-    const fullPath = isAbsolute(notebook_path)
-      ? notebook_path
-      : resolve(getCwd(), notebook_path)
+    // Normalize identically to FileReadTool/FileEditTool (expandPath) so the
+    // readFileState key matches what the Read tool stored. Without this, a Git
+    // Bash path like /c/Users/... is looked up verbatim while Read stored it as
+    // C:\Users\..., so the read-before-edit gate fires even after a real read.
+    const fullPath = expandPath(notebook_path)
 
     // SECURITY: Skip filesystem operations for UNC paths to prevent NTLM credential leaks.
     if (fullPath.startsWith('\\\\') || fullPath.startsWith('//')) {
@@ -210,7 +224,8 @@ export const NotebookEditTool = buildTool({
     if (edit_mode === 'insert' && !cell_type) {
       return {
         result: false,
-        message: 'Cell type is required when using edit_mode=insert.',
+        message:
+          'Cell type is required when using edit_mode=insert. Set cell_type to "code" or "markdown".',
         errorCode: 5,
       }
     }
@@ -223,7 +238,7 @@ export const NotebookEditTool = buildTool({
       return {
         result: false,
         message:
-          'File has not been read yet. Read it first before writing to it.',
+          'File has not been read yet. Read the target .ipynb with the Read tool first, then use the cell_id values shown in the Read output.',
         errorCode: 9,
       }
     }
@@ -261,7 +276,8 @@ export const NotebookEditTool = buildTool({
       if (edit_mode !== 'insert') {
         return {
           result: false,
-          message: 'Cell ID must be specified when not inserting a new cell.',
+          message:
+            'Cell ID must be specified when not inserting a new cell. Read the notebook first and use a cell_id such as "cell-0".',
           errorCode: 7,
         }
       }
@@ -304,9 +320,9 @@ export const NotebookEditTool = buildTool({
     _,
     parentMessage,
   ) {
-    const fullPath = isAbsolute(notebook_path)
-      ? notebook_path
-      : resolve(getCwd(), notebook_path)
+    // Same expandPath normalization as validateInput so file-history, read, and
+    // write all use one canonical path spelling (and match the Read tool's key).
+    const fullPath = expandPath(notebook_path)
 
     if (fileHistoryEnabled()) {
       await fileHistoryTrackEdit(

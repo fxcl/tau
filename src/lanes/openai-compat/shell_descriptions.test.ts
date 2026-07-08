@@ -16,6 +16,9 @@ import { filterToSingleShell, pickPreferredShell } from './single_shell.js'
 import { moonshotTransformer } from './transformers/moonshot.js'
 import { openrouterTransformer } from './transformers/openrouter.js'
 import { minimaxTransformer } from './transformers/minimax.js'
+import { lspToolInputSchema } from '../../tools/LSPTool/schemas.js'
+import { zodToJsonSchema } from '../../utils/zodToJsonSchema.js'
+import { z } from 'zod/v4'
 
 let passed = 0
 let failed = 0
@@ -40,6 +43,48 @@ function assertEq<T>(a: T, b: T, hint: string): void {
     const av = String(a).slice(0, 200)
     const bv = String(b).slice(0, 200)
     throw new Error(`${hint}: expected equal\n  a=${av}\n  b=${bv}`)
+  }
+}
+
+const OPENROUTER_GPT_FORBIDDEN_SCHEMA_KEYS = new Set([
+  '$schema', '$id', '$ref', '$comment', '$defs', 'definitions',
+  'default', 'examples', 'deprecated', 'readOnly', 'writeOnly', 'title',
+  'patternProperties', 'propertyNames', 'minProperties', 'maxProperties',
+  'unevaluatedProperties', 'dependentRequired', 'dependentSchemas',
+  'pattern', 'format', 'minLength', 'maxLength',
+  'minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum', 'multipleOf',
+  'prefixItems', 'unevaluatedItems', 'contains', 'minContains', 'maxContains',
+  'minItems', 'maxItems', 'uniqueItems',
+  'contentMediaType', 'contentEncoding',
+])
+
+function validateOpenRouterGPTSchema(node: unknown, path = '$'): void {
+  if (node === null || typeof node !== 'object') return
+  if (Array.isArray(node)) {
+    node.forEach((item, index) => validateOpenRouterGPTSchema(item, `${path}[${index}]`))
+    return
+  }
+
+  const obj = node as Record<string, unknown>
+  for (const key of Object.keys(obj)) {
+    assert(!OPENROUTER_GPT_FORBIDDEN_SCHEMA_KEYS.has(key), `${path}.${key} must be stripped`)
+  }
+
+  const allowsObject = obj.type === 'object' || (Array.isArray(obj.type) && obj.type.includes('object'))
+  if (allowsObject) {
+    assert(obj.additionalProperties === false, `${path}.additionalProperties must be false`)
+    const props = obj.properties && typeof obj.properties === 'object' && !Array.isArray(obj.properties)
+      ? obj.properties as Record<string, unknown>
+      : {}
+    const required = Array.isArray(obj.required) ? obj.required : []
+    assert(
+      JSON.stringify(required) === JSON.stringify(Object.keys(props)),
+      `${path}.required must match properties; got ${JSON.stringify(required)} wanted ${JSON.stringify(Object.keys(props))}`,
+    )
+  }
+
+  for (const [key, value] of Object.entries(obj)) {
+    validateOpenRouterGPTSchema(value, `${path}.${key}`)
   }
 }
 
@@ -217,6 +262,128 @@ test('OpenRouter Gemini sanitizer filters `required` to declared fields', () => 
 })
 
 // ─── Default generation params ──────────────────────────────────
+
+test('OpenRouter GPT sanitizer requires every declared object property', () => {
+  const input = {
+    type: 'object',
+    properties: {
+      prompt: { type: 'string' },
+      subagent_type: { type: 'string' },
+      options: {
+        type: 'object',
+        properties: {
+          cwd: { type: 'string', minLength: 1 },
+          timeout_ms: { type: 'number', minimum: 0 },
+          metadata: {
+            type: 'object',
+            properties: {
+              source: { type: 'string' },
+            },
+            propertyNames: { pattern: '^[a-z_]+$' },
+            patternProperties: {
+              '^x-': { type: 'string' },
+            },
+          },
+        },
+        required: ['cwd'],
+      },
+    },
+    required: ['prompt'],
+  }
+
+  const out = openrouterTransformer.sanitizeToolSchemaExtra!(input, 'openai/gpt-5.5')
+  assertEq(
+    JSON.stringify(out.required),
+    JSON.stringify(['prompt', 'subagent_type', 'options']),
+    'root required must include subagent_type',
+  )
+  assertEq(out.additionalProperties, false, 'root object must reject extra properties')
+
+  const options = (out.properties as Record<string, any>).options
+  assertEq(
+    JSON.stringify(options.required),
+    JSON.stringify(['cwd', 'timeout_ms', 'metadata']),
+    'nested required must include every nested property',
+  )
+  assertEq(options.additionalProperties, false, 'nested object must reject extra properties')
+  assert((options.properties as Record<string, any>).cwd.minLength === undefined, 'minLength must be stripped')
+  assert((options.properties as Record<string, any>).timeout_ms.minimum === undefined, 'minimum must be stripped')
+  const metadata = (options.properties as Record<string, any>).metadata
+  assert(metadata.propertyNames === undefined, 'propertyNames must be stripped')
+  assert(metadata.patternProperties === undefined, 'patternProperties must be stripped')
+  assertEq(JSON.stringify(metadata.required), JSON.stringify(['source']), 'metadata required must be normalized')
+  assertEq(metadata.additionalProperties, false, 'metadata object must reject extra properties')
+})
+
+test('OpenRouter GPT sanitizer does not require properties dropped by JSON serialization', () => {
+  const input = {
+    type: 'object',
+    properties: {
+      subject: { type: 'string' },
+      description: { type: 'string' },
+      metadata: undefined,
+    },
+    required: ['subject', 'description', 'metadata'],
+  }
+
+  const out = openrouterTransformer.sanitizeToolSchemaExtra!(input, 'openai/gpt-5.5')
+  const wire = JSON.parse(JSON.stringify(out))
+  assert(wire.properties.metadata === undefined, 'metadata property should not be serialized')
+  assertEq(
+    JSON.stringify(wire.required),
+    JSON.stringify(['subject', 'description']),
+    'required must only include serialized properties',
+  )
+})
+
+test('OpenRouter GPT sanitizer stays scoped away from non-GPT models', () => {
+  const input = {
+    type: 'object',
+    properties: {
+      subagent_type: { type: 'string' },
+    },
+  }
+  const out = openrouterTransformer.sanitizeToolSchemaExtra!(input, 'anthropic/claude-sonnet-4.6')
+  assert(out.required === undefined, 'non-GPT OpenRouter schema must not gain required')
+  assert(out.additionalProperties === undefined, 'non-GPT OpenRouter schema must not gain additionalProperties')
+})
+
+test('OpenRouter GPT sanitizer accepts task, LSP, AFT, and native-style schemas', () => {
+  const schemas: Record<string, Record<string, unknown>> = {
+    TaskCreate: zodToJsonSchema(z.strictObject({
+      subject: z.string(),
+      description: z.string(),
+      activeForm: z.string().optional(),
+      metadata: z.record(z.string(), z.unknown()).optional(),
+    })),
+    LSP: zodToJsonSchema(lspToolInputSchema()),
+    AFT: {
+      type: 'object',
+      properties: {
+        target: { anyOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }] },
+        contextLines: { type: 'integer', minimum: 1, maximum: 50 },
+        options: {
+          type: 'object',
+          properties: { includePrivate: { type: 'boolean', default: false } },
+          propertyNames: { pattern: '^[a-zA-Z]+$' },
+        },
+      },
+    },
+    Native: {
+      type: 'object',
+      properties: {
+        repo: { type: 'string', format: 'uri-reference' },
+        commits: { type: 'integer', minimum: 0, maximum: 50 },
+        status: { type: 'boolean' },
+      },
+    },
+  }
+
+  for (const [name, schema] of Object.entries(schemas)) {
+    const out = openrouterTransformer.sanitizeToolSchemaExtra!(schema, 'openai/gpt-5.5')
+    validateOpenRouterGPTSchema(out, `$tools.${name}`)
+  }
+})
 
 test('Moonshot defaults non-thinking Kimi to temperature 0.6', () => {
   const out = moonshotTransformer.defaultGenerationParams!('kimi-k2-turbo-preview')

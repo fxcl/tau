@@ -52,6 +52,7 @@ import {
 import type { AppState } from 'src/state/AppState.js'
 import type { PluginError } from 'src/types/plugin.js'
 import { logForDebugging } from 'src/utils/debug.js'
+import { getPowerModeFromSettings } from 'src/utils/powerMode.js'
 import { getAllowedChannels } from '../../bootstrap/state.js'
 import { useNotifications } from '../../context/notifications.js'
 import {
@@ -151,6 +152,9 @@ export function useManageMCPConnections(
   // which has been cleared by refreshActivePlugins, so the effects below see
   // fresh plugin data on re-run.
   const _pluginReconnectKey = useAppState(s => s.mcp.pluginReconnectKey)
+  // Power mode gates all MCP activity: 'cheap' skips config loading and
+  // connections entirely. Reactive so /mode switches apply mid-session.
+  const powerMode = useAppState(s => getPowerModeFromSettings(s.settings))
   const setAppState = useSetAppState()
 
   // Track active reconnection attempts to allow cancellation
@@ -770,6 +774,10 @@ export function useManageMCPConnections(
   // useEffect below runs immediately after and dedups before connecting.
   const sessionId = getSessionId()
   useEffect(() => {
+    // Cheap power mode: no MCP at all — nothing to register as pending.
+    // The effect re-runs on mode change (powerMode dep) so leaving cheap
+    // mode picks the servers back up without a restart.
+    if (powerMode === 'cheap') return
     async function initializeServersAsPending() {
       const { servers: existingConfigs, errors: mcpErrors } = isStrictMcpConfig
         ? { servers: {}, errors: [] }
@@ -851,11 +859,14 @@ export function useManageMCPConnections(
     setAppState,
     sessionId,
     _pluginReconnectKey,
+    powerMode,
   ])
 
   // Load MCP configs and connect to servers
   // Two-phase loading: Tau configs first (fast), then claude.ai configs (may be slow)
   useEffect(() => {
+    // Cheap power mode: never connect to MCP servers (local or claude.ai).
+    if (powerMode === 'cheap') return
     let cancelled = false
 
     async function loadAndConnectMcpConfigs() {
@@ -1021,6 +1032,7 @@ export function useManageMCPConnections(
     _authVersion,
     sessionId,
     _pluginReconnectKey,
+    powerMode,
   ])
 
   // Cleanup all timers on unmount

@@ -205,7 +205,7 @@ function _buildCursorPreconditionGuide(originalTools: ProviderTool[]): string {
   const lines: string[] = []
 
   if (originalNames.has('NotebookEdit')) {
-    lines.push('Before NotebookEdit, read the target .ipynb with read_file and use a real cell_id for replace/delete. For insert, include cell_type as "code" or "markdown".')
+    lines.push('Before NotebookEdit, read the target .ipynb with read_file and use the real cell_id shown there, such as "cell-0" instead of "0", for replace/delete. For insert, include cell_type as "code" or "markdown".')
   }
 
   if (originalNames.has('EnterWorktree') || originalNames.has('ExitWorktree')) {

@@ -3,6 +3,9 @@ import { feature } from 'bun:bundle';
 import React, { createContext, useContext, useEffect, useMemo, useState } from 'react';
 import useStdin from '../../ink/hooks/use-stdin.js';
 import { getGlobalConfig, saveGlobalConfig } from '../../utils/config.js';
+import { initializePowerModeTheme, isPowerModeThemeTransitionActive, subscribePowerModeTheme } from '../../utils/modeTheme.js';
+import { getPowerModeFromSettings } from '../../utils/powerMode.js';
+import { getInitialSettings } from '../../utils/settings/settings.js';
 import { getSystemThemeName, type SystemTheme } from '../../utils/systemTheme.js';
 import type { ThemeName, ThemeSetting } from '../../utils/theme.js';
 type ThemeContextValue = {
@@ -14,6 +17,12 @@ type ThemeContextValue = {
   cancelPreview: () => void;
   /** The resolved theme to render with. Never 'auto'. */
   currentTheme: ThemeName;
+  /**
+   * Bumped ~30fps while a /mode palette cross-fade runs so every themed
+   * component re-resolves getTheme() and picks up the interpolated accents.
+   * Constant when idle — zero re-render cost outside transitions.
+   */
+  modeThemeTick: number;
 };
 
 // Non-'auto' default so useTheme() works without a provider (tests, tooling).
@@ -24,7 +33,8 @@ const ThemeContext = createContext<ThemeContextValue>({
   setPreviewTheme: () => {},
   savePreview: () => {},
   cancelPreview: () => {},
-  currentTheme: DEFAULT_THEME
+  currentTheme: DEFAULT_THEME,
+  modeThemeTick: 0
 });
 type Props = {
   children: React.ReactNode;
@@ -47,6 +57,43 @@ export function ThemeProvider({
 }: Props) {
   const [themeSetting, setThemeSetting] = useState(initialState ?? defaultInitialTheme);
   const [previewTheme, setPreviewTheme] = useState<ThemeSetting | null>(null);
+
+  // Power-mode palette: seed from persisted settings so the first frame
+  // already renders bronze (cheap) / gold (full), then tick ~30fps while a
+  // /mode cross-fade is active so themed components re-resolve getTheme().
+  const [modeThemeTick, setModeThemeTick] = useState(() => {
+    initializePowerModeTheme(getPowerModeFromSettings(getInitialSettings()));
+    return 0;
+  });
+  useEffect(() => {
+    let interval: ReturnType<typeof setInterval> | null = null;
+    const stop = () => {
+      if (interval !== null) {
+        clearInterval(interval);
+        interval = null;
+      }
+    };
+    const start = () => {
+      setModeThemeTick(t => t + 1);
+      if (interval !== null) return;
+      interval = setInterval(() => {
+        // Bump first so the frame after the fade completes still repaints
+        // once with the settled palette before the ticker stops.
+        setModeThemeTick(t => t + 1);
+        if (!isPowerModeThemeTransitionActive()) {
+          stop();
+        }
+      }, 33);
+    };
+    const unsubscribe = subscribePowerModeTheme(start);
+    if (isPowerModeThemeTransitionActive()) {
+      start();
+    }
+    return () => {
+      unsubscribe();
+      stop();
+    };
+  }, []);
 
   // Track terminal theme for 'auto' resolution. Seeds from $COLORFGBG (or
   // 'dark' if unset); the OSC 11 watcher corrects it on first poll.
@@ -110,8 +157,9 @@ export function ThemeProvider({
         setPreviewTheme(null);
       }
     },
-    currentTheme
-  }), [themeSetting, previewTheme, currentTheme, onThemeSave]);
+    currentTheme,
+    modeThemeTick
+  }), [themeSetting, previewTheme, currentTheme, onThemeSave, modeThemeTick]);
   return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>;
 }
 

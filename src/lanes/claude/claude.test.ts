@@ -37,6 +37,9 @@ function main(): void {
   test('supports claude-sonnet-4-6', () => {
     assert(claudeLane.supportsModel('claude-sonnet-4-6'), 'expected support')
   })
+  test('supports claude-sonnet-5', () => {
+    assert(claudeLane.supportsModel('claude-sonnet-5'), 'expected support')
+  })
   test('supports claude-opus-4-7', () => {
     assert(claudeLane.supportsModel('claude-opus-4-7'), 'expected support')
   })
@@ -94,6 +97,10 @@ function main(): void {
     const models = await claudeLane.listModels()
     assert(models.length >= 3, `expected >=3 models, got ${models.length}`)
     assert(models.every(m => m.id && m.name), 'every entry has id+name')
+    assert(
+      models.some(m => m.id === 'claude-sonnet-5' && m.name === 'Claude Sonnet 5'),
+      'expected Claude Sonnet 5 in catalog',
+    )
   })
 
   console.log(`\n${passed} passed, ${failed} failed`)

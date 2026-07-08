@@ -103,6 +103,12 @@ const outputSchema = lazySchema(() =>
 type OutputSchema = ReturnType<typeof outputSchema>
 export type Output = z.infer<OutputSchema>
 type Match = z.infer<typeof matchSchema>
+export type RetrieveCodebaseInput = {
+  query: string
+  root?: string
+  maxResults?: number
+  includeSnippets?: boolean
+}
 
 function renderText(message: string): React.ReactNode {
   return createElement(Text, null, message)
@@ -216,6 +222,23 @@ function scoreFile(path: string, root: string, queryTerms: string[], includeSnip
   }
 }
 
+export function retrieveCodebase(input: RetrieveCodebaseInput): Output {
+  const root = resolveRoot(input.root)
+  const stat = safeStat(root)
+  const { files, truncated } =
+    existsSync(root) && stat?.isDirectory()
+      ? walk(root, 15_000)
+      : { files: [], truncated: false }
+  const terms = tokenize(input.query)
+  const includeSnippets = input.includeSnippets !== false
+  const matches = files
+    .map(path => scoreFile(path, root, terms, includeSnippets))
+    .filter((m): m is Match => m !== null)
+    .sort((a, b) => b.score - a.score || a.relativePath.localeCompare(b.relativePath))
+    .slice(0, input.maxResults ?? 10)
+  return { query: input.query, root, matches, searchedFiles: files.length, truncated }
+}
+
 export const CodebaseRetrievalTool = buildTool({
   name: CODEBASE_RETRIEVAL_TOOL_NAME,
   searchHint: 'semantic repository retrieval',
@@ -258,20 +281,7 @@ export const CodebaseRetrievalTool = buildTool({
     return renderText(`${output.matches.length} match(es) from ${output.searchedFiles} file(s)`)
   },
   async call(input) {
-    const root = resolveRoot(input.root)
-    const stat = safeStat(root)
-    const { files, truncated } =
-      existsSync(root) && stat?.isDirectory()
-        ? walk(root, 15_000)
-        : { files: [], truncated: false }
-    const terms = tokenize(input.query)
-    const includeSnippets = input.includeSnippets !== false
-    const matches = files
-      .map(path => scoreFile(path, root, terms, includeSnippets))
-      .filter((m): m is Match => m !== null)
-      .sort((a, b) => b.score - a.score || a.relativePath.localeCompare(b.relativePath))
-      .slice(0, input.maxResults ?? 10)
-    return { data: { query: input.query, root, matches, searchedFiles: files.length, truncated } }
+    return { data: retrieveCodebase(input) }
   },
   mapToolResultToToolResultBlockParam(output, toolUseID) {
     const lines = [

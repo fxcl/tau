@@ -16,6 +16,7 @@ import type {
 import { getFsImplementation } from './fsOperations.js'
 import { expandPath } from './path.js'
 import { jsonParse } from './slowOperations.js'
+export { parseCellId } from './notebookCellId.js'
 
 const LARGE_OUTPUT_THRESHOLD = 10000
 
@@ -212,13 +213,4 @@ export function mapNotebookCellsToToolResult(
       [],
     ),
   }
-}
-
-export function parseCellId(cellId: string): number | undefined {
-  const match = cellId.match(/^cell-(\d+)$/)
-  if (match && match[1]) {
-    const index = parseInt(match[1], 10)
-    return isNaN(index) ? undefined : index
-  }
-  return undefined
 }

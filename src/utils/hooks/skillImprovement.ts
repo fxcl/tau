@@ -7,6 +7,7 @@ import {
   logEvent,
 } from '../../services/analytics/index.js'
 import { queryModelWithoutStreaming } from '../../services/api/claude.js'
+import { areNonEssentialModelCallsDisabled } from '../sideQueries.js'
 import { getEmptyToolPermissionContext } from '../../Tool.js'
 import type { Message } from '../../types/message.js'
 import { createAbortController } from '../abortController.js'
@@ -190,6 +191,8 @@ export async function applySkillImprovement(
   updates: SkillUpdate[],
 ): Promise<void> {
   if (!skillName) return
+  // Optional background call — suppressed by the side-query kill switch.
+  if (areNonEssentialModelCallsDisabled()) return
 
   const { join } = await import('path')
   const fs = await import('fs/promises')

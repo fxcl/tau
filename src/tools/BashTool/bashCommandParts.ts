@@ -154,12 +154,12 @@ export function validateBashCommandPartsMatch(
     ok: false,
     compiledCommand: compiled.command,
     message: [
-      'Blocked: command does not match the structured Bash command parts.',
+      'command does not match the structured Bash command parts.',
       '',
       'Compiled command:',
       compiled.command,
       '',
-      'Use the compiled command exactly, or remove command_parts if you are intentionally writing raw Bash.',
+      'Mismatched command_parts are ignored and `command` executes as written. Omit command_parts, or make them compile to the exact command.',
     ].join('\n'),
   }
 }

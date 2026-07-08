@@ -1,4 +1,5 @@
 import { dirname, isAbsolute, sep } from 'path'
+import { pathToFileURL } from 'url'
 import { logEvent } from 'src/services/analytics/index.js'
 import { getFeatureValue_CACHED_MAY_BE_STALE } from '../../services/analytics/growthbook.js'
 import { diagnosticTracker } from '../../services/diagnosticTracking.js'
@@ -57,6 +58,7 @@ import {
   FILE_UNEXPECTEDLY_MODIFIED_ERROR,
 } from './constants.js'
 import { getEditToolDescription } from './prompt.js'
+import { noteFileRead, shouldBlockUnreadEdit } from './readFirstGuard.js'
 import {
   type FileEditInput,
   type FileEditOutput,
@@ -149,15 +151,13 @@ export const FileEditTool = buildTool({
     if (secretError) {
       return { result: false, message: secretError, errorCode: 0 }
     }
-    if (old_string === new_string) {
-      return {
-        result: false,
-        behavior: 'ask',
-        message:
-          'No changes to make: old_string and new_string are exactly the same.',
-        errorCode: 1,
-      }
-    }
+    // old_string === new_string is a no-op, NOT an error. Rejecting it here
+    // made every provider loop: the model re-issued the identical call, got the
+    // same error, and never progressed (the "No changes to make" / "Error
+    // editing file" churn in the bug reports). We let it through and resolve it
+    // idempotently in call() — if old_string genuinely isn't in the file, the
+    // "String to replace not found" check below still fires (with the current
+    // content as a recovery hint), so a wrong assumption is never masked.
 
     // Check if path should be ignored based on permission settings
     const appState = toolUseContext.getAppState()
@@ -277,13 +277,37 @@ export const FileEditTool = buildTool({
     }
 
     let readTimestamp = toolUseContext.readFileState.get(fullFilePath)
+    if (readTimestamp) {
+      // A real read exists (full or windowed) — clear any stale blind-edit block
+      // counter so a future blind edit of this file starts enforcement fresh.
+      noteFileRead(fullFilePath)
+    } else if (shouldBlockUnreadEdit(fullFilePath)) {
+      // Read-before-Edit (matches FileWriteTool/NotebookEditTool). A blind edit —
+      // no prior Read of this file this session — is blocked so the model reads
+      // first and its old_string is copied from real content instead of guessed,
+      // which prevents the wrong-old_string "String to replace not found" churn.
+      // This returns to the MODEL as a <tool_use_error> tool_result (never a user
+      // prompt), so the model self-corrects by reading, then retrying. The block
+      // is BOUNDED by shouldBlockUnreadEdit: after a couple of blocks on the same
+      // file it returns false and we fall through to seeding below — so a model
+      // that ignores the error can never loop forever. New-file creation
+      // (old_string === '') returned earlier, so it never reaches here.
+      return {
+        result: false,
+        message:
+          "File has not been read yet. Read it first with the Read tool before editing it — your old_string must match the file's exact current contents character-for-character.",
+        errorCode: 6,
+      }
+    }
+
+    // Seed a full read-state when there is no full read yet: either the model
+    // read only a window (Read with offset/limit), or it never read the file but
+    // the loop guard above is exhausted (degrade-to-proceed so repeated blind
+    // edits can't loop). Both proceed; safety is still enforced by the old_string
+    // match below — a region the model never saw fails with "String to replace
+    // not found", never a silent clobber. Preserves the prior read-state cache
+    // behavior for the partial-view case.
     if (!readTimestamp || readTimestamp.isPartialView) {
-      // Auto-read recovery: the model attempted an edit without a prior full
-      // read. Rather than hard-blocking (which only costs a round-trip — the
-      // model reads, then retries the identical edit), seed readFileState from
-      // the content we already loaded above and continue. Safety is preserved
-      // by the old_string match below: a wrong assumption fails with "String to
-      // replace not found", never a silent clobber.
       const seeded = {
         content: fileContent,
         timestamp: getFileModificationTime(fullFilePath),
@@ -323,10 +347,18 @@ export const FileEditTool = buildTool({
     // Use findActualString to handle quote normalization
     const actualOldString = findActualString(file, old_string)
     if (!actualOldString) {
+      // Anchor the retry: models that edited blind (or against a stale view)
+      // keep guessing old_string variants and loop. For small files, show the
+      // real content so the next attempt can copy it exactly; for larger
+      // files, direct the model to re-read instead of guessing again.
+      const recoveryHint =
+        file.length <= 2000
+          ? `\nCurrent file content:\n${file}`
+          : '\nRead the file with the Read tool to see its current content, then retry with an exact, character-for-character old_string.'
       return {
         result: false,
         behavior: 'ask',
-        message: `String to replace not found in file.\nString: ${old_string}`,
+        message: `String to replace not found in file.\nString: ${old_string}\n${recoveryHint}`,
         meta: {
           isFilePathAbsolute: String(isAbsolute(file_path)),
         },
@@ -497,6 +529,35 @@ export const FileEditTool = buildTool({
       replaceAll: replace_all,
     })
 
+    // Idempotent no-op: the resolved edit leaves the file byte-for-byte
+    // identical (old_string === new_string, or new_string already equals the
+    // matched text). Skip the write and every downstream side effect — LSP
+    // didChange/didSave, the VSCode diff, file-history, analytics — since
+    // nothing changed, and return a result that says so plainly so the model
+    // moves on instead of re-issuing the same edit. Guarded on fileExists so
+    // creating a brand-new empty file (originalFileContents === '' with the
+    // file absent) is never mistaken for a no-op and dropped.
+    if (fileExists && updatedFile === originalFileContents) {
+      readFileState.set(absoluteFilePath, {
+        content: originalFileContents,
+        timestamp: getFileModificationTime(absoluteFilePath),
+        offset: undefined,
+        limit: undefined,
+      })
+      return {
+        data: {
+          filePath: file_path,
+          oldString: actualOldString,
+          newString: new_string,
+          originalFile: originalFileContents,
+          structuredPatch: patch,
+          userModified: userModified ?? false,
+          replaceAll: replace_all,
+          noOp: true,
+        },
+      }
+    }
+
     // 5. Write to disk
     writeTextContent(absoluteFilePath, updatedFile, encoding, endings)
 
@@ -504,7 +565,7 @@ export const FileEditTool = buildTool({
     const lspManager = getLspServerManager()
     if (lspManager) {
       // Clear previously delivered diagnostics so new ones will be shown
-      clearDeliveredDiagnosticsForFile(`file://${absoluteFilePath}`)
+      clearDeliveredDiagnosticsForFile(pathToFileURL(absoluteFilePath).href)
       // didChange: Content has been modified
       lspManager
         .changeFile(absoluteFilePath, updatedFile)
@@ -600,7 +661,19 @@ export const FileEditTool = buildTool({
     }
   },
   mapToolResultToToolResultBlockParam(data: FileEditOutput, toolUseID) {
-    const { filePath, userModified, replaceAll, syntaxWarning } = data
+    const { filePath, userModified, replaceAll, syntaxWarning, noOp } = data
+
+    // No-op edit: nothing was written. Say so explicitly (and terminally) so
+    // the model doesn't read "updated successfully" and loop trying to force a
+    // change that is already in place.
+    if (noOp) {
+      return {
+        tool_use_id: toolUseID,
+        type: 'tool_result',
+        content: `No changes made to ${filePath}: it already contains that exact text (old_string and new_string are identical, or the replacement matches the current content). Nothing was written — do not retry this edit.`,
+      }
+    }
+
     const modifiedNote = userModified
       ? '.  The user modified your proposed changes before accepting them. '
       : ''

@@ -355,11 +355,39 @@ export type ShellSegment = {
   end: number
 }
 
+/**
+ * A heredoc operator (`<<`) immediately followed by a delimiter word — quoted
+ * (`<<'EOF'` / `<<"EOF"`), escaped (`<<\EOF`), or bare (`<<EOF`). A leading `-`
+ * (`<<-EOF`) is allowed. This is the ONLY shape treated as a heredoc opener.
+ *
+ * Non-global on purpose: `.exec` and `.test` both start from index 0 with no
+ * lingering `lastIndex`, so the two call sites (the splitter's per-line `.exec`
+ * and `hasHeredocOpener`'s `.test`) can never disagree.
+ */
+const HEREDOC_OPENER_RE =
+  /<<(-)?\s*(?:'([^']+)'|"([^"]+)"|\\([A-Za-z_][A-Za-z0-9_]*)|([A-Za-z_][A-Za-z0-9_]*))/
+
+/**
+ * True only for a REAL heredoc opener — not any `<<` substring. The delegating
+ * rewrites below gate on this rather than `includes('<<')` so a bare shift
+ * operator (`$((1 << 2))`) or trailing content after a closed heredoc does NOT
+ * route back through transformOutsideHeredocBodies. That mismatch was a hard
+ * infinite recursion: the splitter leaves a non-opener `<<` in the `outside`
+ * chunk, the transform sees `includes('<<')` and re-delegates on the exact same
+ * string, and the pair ping-pong until the stack blows ("Maximum call stack
+ * size exceeded"). Because `outside` is built only from lines the splitter
+ * found NO opener on, hasHeredocOpener(outside) is always false there, so the
+ * final transform(outside) can never re-enter.
+ */
+function hasHeredocOpener(command: string): boolean {
+  return HEREDOC_OPENER_RE.test(command)
+}
+
 function transformOutsideHeredocBodies(
   command: string,
   transform: (chunk: string) => string,
 ): string {
-  if (!command.includes('<<')) return transform(command)
+  if (!hasHeredocOpener(command)) return transform(command)
 
   const lines = command.match(/[^\n]*\n|[^\n]+$/g) ?? [command]
   let out = ''
@@ -379,10 +407,7 @@ function transformOutsideHeredocBodies(
       continue
     }
 
-    const opener =
-      /<<(-)?\s*(?:'([^']+)'|"([^"]+)"|\\([A-Za-z_][A-Za-z0-9_]*)|([A-Za-z_][A-Za-z0-9_]*))/.exec(
-        line,
-      )
+    const opener = HEREDOC_OPENER_RE.exec(line)
     if (!opener) {
       outside += line
       continue
@@ -587,7 +612,7 @@ function findLastUnescapedDoubleQuote(value: string): number {
  * quoted span instead of rejecting the command.
  */
 export function rewriteAmbiguousInlineCodeQuoting(command: string): string {
-  if (command.includes('<<')) {
+  if (hasHeredocOpener(command)) {
     return transformOutsideHeredocBodies(
       command,
       rewriteAmbiguousInlineCodeQuoting,
@@ -682,7 +707,7 @@ function looksLikePathValue(value: string): boolean {
  * values are left untouched.
  */
 export function rewritePortablePathOptionSpacing(command: string): string {
-  if (command.includes('<<')) {
+  if (hasHeredocOpener(command)) {
     return transformOutsideHeredocBodies(
       command,
       rewritePortablePathOptionSpacing,
@@ -1270,7 +1295,7 @@ function singleQuoteAssignmentValue(value: string): string {
  * because rewriting their shell grammar would be less safe than preserving it.
  */
 export function rewriteWindowsRemotePosixPaths(command: string): string {
-  if (command.includes('<<')) {
+  if (hasHeredocOpener(command)) {
     return transformOutsideHeredocBodies(
       command,
       rewriteWindowsRemotePosixPaths,
@@ -1355,7 +1380,7 @@ const URL_WITH_AMP_REGEX = /\bhttps?:\/\/(?:[^\s'"&]|&(?!&))+/g
  * detach validator.
  */
 export function rewriteUnquotedUrlAmpersand(command: string): string {
-  if (command.includes('<<')) {
+  if (hasHeredocOpener(command)) {
     return transformOutsideHeredocBodies(command, rewriteUnquotedUrlAmpersand)
   }
   if (!command.includes('&') || !/https?:\/\//.test(command)) {
@@ -1387,7 +1412,7 @@ const PIPED_DOCKER_EXEC_REGEX =
  * idempotent.
  */
 export function rewritePipedDockerExecStdin(command: string): string {
-  if (command.includes('<<')) {
+  if (hasHeredocOpener(command)) {
     return transformOutsideHeredocBodies(command, rewritePipedDockerExecStdin)
   }
   if (

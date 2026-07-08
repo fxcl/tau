@@ -321,9 +321,12 @@ export function getKiloCodeOrgId(): string | null {
 
 const CLINE_API_BASE = 'https://api.cline.bot'
 const CLINE_STORAGE = 'cline_oauth'
+const CLINE_PASS_STORAGE = 'clinepass_oauth'
 const CLINE_WORKOS_API_BASE = 'https://api.workos.com'
 const CLINE_WORKOS_CLIENT_ID = 'client_01K3A541FN8TA3EPPHTD2325AR'
 const CLINE_DEVICE_AUTH_TIMEOUT_MS = 30_000
+
+export type ClineOAuthTarget = 'auth' | 'pass'
 
 export interface ClineDeviceHandles {
   userCode: string
@@ -363,6 +366,10 @@ function _unwrapClineTokenResponse(data: unknown): ClineTokenResponseData {
   return envelopeData as ClineTokenResponseData
 }
 
+function _clineStorageKey(target: ClineOAuthTarget): string {
+  return target === 'pass' ? CLINE_PASS_STORAGE : CLINE_STORAGE
+}
+
 export async function initiateClineOAuth(): Promise<ClineDeviceHandles> {
   const res = await fetch(`${CLINE_WORKOS_API_BASE}/user_management/authorize/device`, {
     method: 'POST',
@@ -396,7 +403,10 @@ export async function initiateClineOAuth(): Promise<ClineDeviceHandles> {
   }
 }
 
-export async function completeClineOAuth(handles: ClineDeviceHandles): Promise<{
+export async function completeClineOAuth(
+  handles: ClineDeviceHandles,
+  target: ClineOAuthTarget = 'auth',
+): Promise<{
   accessToken: string
   refreshToken: string
 }> {
@@ -461,7 +471,7 @@ export async function completeClineOAuth(handles: ClineDeviceHandles): Promise<{
     throw new Error('Cline token registration did not return Cline tokens')
   }
 
-  _saveTokens(CLINE_STORAGE, {
+  _saveTokens(_clineStorageKey(target), {
     accessToken,
     refreshToken,
     expiresIn: _expiresInFromClineExpiresAt(tokenData.expiresAt),
@@ -488,7 +498,23 @@ export function getClineOAuthToken(): string | null {
   return _loadTokens(CLINE_STORAGE)?.accessToken ?? null
 }
 
-export async function refreshClineOAuth(refreshToken: string): Promise<string> {
+export async function startClinePassOAuth(): Promise<{
+  accessToken: string
+  refreshToken: string
+}> {
+  const handles = await initiateClineOAuth()
+  await openBrowser(handles.verificationUriComplete || handles.verificationUri)
+  return completeClineOAuth(handles, 'pass')
+}
+
+export function getClinePassOAuthToken(): string | null {
+  return _loadTokens(CLINE_PASS_STORAGE)?.accessToken ?? null
+}
+
+export async function refreshClineOAuth(
+  refreshToken: string,
+  target: ClineOAuthTarget = 'auth',
+): Promise<string> {
   const res = await fetch(`${CLINE_API_BASE}/api/v1/auth/refresh`, {
     method: 'POST',
     headers: {
@@ -504,7 +530,7 @@ export async function refreshClineOAuth(refreshToken: string): Promise<string> {
   const data = _unwrapClineTokenResponse(await res.json().catch(() => ({})))
   const accessToken = data.accessToken ?? ''
   if (!accessToken) throw new Error('Cline refresh: no access token in response')
-  _saveTokens(CLINE_STORAGE, {
+  _saveTokens(_clineStorageKey(target), {
     accessToken,
     refreshToken: data.refreshToken ?? refreshToken,
     expiresIn: _expiresInFromClineExpiresAt(data.expiresAt),

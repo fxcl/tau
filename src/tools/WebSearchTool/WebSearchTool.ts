@@ -19,6 +19,11 @@ import {
   runFirecrawlWebSearch,
   type FirecrawlSearchHit,
 } from './firecrawl.js'
+import {
+  runMcpWebSearch,
+  type McpWebSearchHit,
+  type McpWebSearchProvider,
+} from './mcpWebSearch.js'
 import { getWebSearchPrompt, WEB_SEARCH_TOOL_NAME } from './prompt.js'
 import {
   getToolUseSummary,
@@ -172,6 +177,37 @@ function makeOutputFromFirecrawlResponse(
   }
 }
 
+function getMcpProviderLabel(provider: McpWebSearchProvider): string {
+  return provider === 'parallel' ? 'Parallel Web Search' : 'Exa Web Search'
+}
+
+function makeOutputFromMcpSearchResponse(
+  text: string,
+  hits: McpWebSearchHit[],
+  provider: McpWebSearchProvider,
+  query: string,
+  durationSeconds: number,
+): Output {
+  if (hits.length) {
+    return {
+      query,
+      results: [
+        {
+          tool_use_id: `mcp-search-${provider}-${Date.now()}`,
+          content: hits,
+        },
+      ],
+      durationSeconds,
+    }
+  }
+
+  return {
+    query,
+    results: [`${getMcpProviderLabel(provider)} results:\n\n${text}`],
+    durationSeconds,
+  }
+}
+
 function makeOutputFromSearchResponse(
   result: BetaContentBlock[],
   query: string,
@@ -255,7 +291,7 @@ export const WebSearchTool = buildTool({
     return summary ? `Searching for ${summary}` : 'Searching the web'
   },
   isEnabled() {
-    return supportsAnthropicServerWebSearch() || hasFirecrawlSearchConfig()
+    return true
   },
   get inputSchema(): InputSchema {
     return inputSchema()
@@ -320,6 +356,7 @@ export const WebSearchTool = buildTool({
   async call(input, context, _canUseTool, _parentMessage, onProgress) {
     const startTime = performance.now()
     const { query } = input
+
     const runFirecrawlSearch = async () => {
       onProgress?.({
         toolUseID: 'firecrawl-search-query',
@@ -349,161 +386,203 @@ export const WebSearchTool = buildTool({
       }
     }
 
-    if (!supportsAnthropicServerWebSearch()) {
-      return runFirecrawlSearch()
+    const runMcpSearch = async () => {
+      onProgress?.({
+        toolUseID: 'mcp-search-query',
+        data: {
+          type: 'query_update',
+          query,
+        },
+      })
+      const result = await runMcpWebSearch(
+        input,
+        context.abortController.signal,
+      )
+      onProgress?.({
+        toolUseID: 'mcp-search-results',
+        data: {
+          type: 'search_results_received',
+          resultCount: result.hits.length || 1,
+          query,
+        },
+      })
+      return {
+        data: makeOutputFromMcpSearchResponse(
+          result.text,
+          result.hits,
+          result.provider,
+          query,
+          result.durationSeconds,
+        ),
+      }
+    }
+
+    const runAnthropicServerSearch = async () => {
+      const userMessage = createUserMessage({
+        content: 'Perform a web search for the query: ' + query,
+      })
+      const toolSchema = makeToolSchema(input)
+
+      const useHaiku = getFeatureValue_CACHED_MAY_BE_STALE(
+        'tengu_plum_vx3',
+        false,
+      )
+
+      const appState = context.getAppState()
+      const queryStream = queryModelWithStreaming({
+        messages: [userMessage],
+        systemPrompt: asSystemPrompt([
+          'You are an assistant for performing a web search tool use',
+        ]),
+        thinkingConfig: useHaiku
+          ? { type: 'disabled' as const }
+          : context.options.thinkingConfig,
+        tools: [],
+        signal: context.abortController.signal,
+        options: {
+          getToolPermissionContext: async () => appState.toolPermissionContext,
+          model: useHaiku ? getSmallFastModel() : context.options.mainLoopModel,
+          toolChoice: useHaiku
+            ? { type: 'tool', name: 'web_search' }
+            : undefined,
+          isNonInteractiveSession: context.options.isNonInteractiveSession,
+          hasAppendSystemPrompt: !!context.options.appendSystemPrompt,
+          extraToolSchemas: [toolSchema],
+          querySource: 'web_search_tool',
+          agents: context.options.agentDefinitions.activeAgents,
+          mcpTools: [],
+          agentId: context.agentId,
+          effortValue: appState.effortValue,
+        },
+      })
+
+      const allContentBlocks: BetaContentBlock[] = []
+      let currentToolUseId = null
+      let currentToolUseJson = ''
+      let progressCounter = 0
+      const toolUseQueries = new Map() // Map of tool_use_id to query
+
+      for await (const event of queryStream) {
+        if (event.type === 'assistant') {
+          allContentBlocks.push(...event.message.content)
+          continue
+        }
+
+        // Track tool use ID when server_tool_use starts
+        if (
+          event.type === 'stream_event' &&
+          event.event?.type === 'content_block_start'
+        ) {
+          const contentBlock = event.event.content_block
+          if (contentBlock && contentBlock.type === 'server_tool_use') {
+            currentToolUseId = contentBlock.id
+            currentToolUseJson = ''
+            // Note: The ServerToolUseBlock doesn't contain input.query
+            // The actual query comes through input_json_delta events
+            continue
+          }
+        }
+
+        // Accumulate JSON for current tool use
+        if (
+          currentToolUseId &&
+          event.type === 'stream_event' &&
+          event.event?.type === 'content_block_delta'
+        ) {
+          const delta = event.event.delta
+          if (delta?.type === 'input_json_delta' && delta.partial_json) {
+            currentToolUseJson += delta.partial_json
+
+            // Try to extract query from partial JSON for progress updates
+            try {
+              // Look for a complete query field
+              const queryMatch = currentToolUseJson.match(
+                /"query"\s*:\s*"((?:[^"\\]|\\.)*)"/,
+              )
+              if (queryMatch && queryMatch[1]) {
+                // The regex properly handles escaped characters
+                const query = jsonParse('"' + queryMatch[1] + '"')
+
+                if (
+                  !toolUseQueries.has(currentToolUseId) ||
+                  toolUseQueries.get(currentToolUseId) !== query
+                ) {
+                  toolUseQueries.set(currentToolUseId, query)
+                  progressCounter++
+                  if (onProgress) {
+                    onProgress({
+                      toolUseID: `search-progress-${progressCounter}`,
+                      data: {
+                        type: 'query_update',
+                        query,
+                      },
+                    })
+                  }
+                }
+              }
+            } catch {
+              // Ignore parsing errors for partial JSON
+            }
+          }
+        }
+
+        // Yield progress when search results come in
+        if (
+          event.type === 'stream_event' &&
+          event.event?.type === 'content_block_start'
+        ) {
+          const contentBlock = event.event.content_block
+          if (contentBlock && contentBlock.type === 'web_search_tool_result') {
+            // Get the actual query that was used for this search
+            const toolUseId = contentBlock.tool_use_id
+            const actualQuery = toolUseQueries.get(toolUseId) || query
+            const content = contentBlock.content
+
+            progressCounter++
+            if (onProgress) {
+              onProgress({
+                toolUseID: toolUseId || `search-progress-${progressCounter}`,
+                data: {
+                  type: 'search_results_received',
+                  resultCount: Array.isArray(content) ? content.length : 0,
+                  query: actualQuery,
+                },
+              })
+            }
+          }
+        }
+      }
+
+      // Process the final result
+      const endTime = performance.now()
+      const durationSeconds = (endTime - startTime) / 1000
+
+      const data = makeOutputFromSearchResponse(
+        allContentBlocks,
+        query,
+        durationSeconds,
+      )
+      return { data }
+    }
+
+    if (hasFirecrawlSearchConfig()) {
+      try {
+        return await runFirecrawlSearch()
+      } catch (error) {
+        logError(error instanceof Error ? error : new Error(String(error)))
+      }
     }
 
     try {
-    const userMessage = createUserMessage({
-      content: 'Perform a web search for the query: ' + query,
-    })
-    const toolSchema = makeToolSchema(input)
-
-    const useHaiku = getFeatureValue_CACHED_MAY_BE_STALE(
-      'tengu_plum_vx3',
-      false,
-    )
-
-    const appState = context.getAppState()
-    const queryStream = queryModelWithStreaming({
-      messages: [userMessage],
-      systemPrompt: asSystemPrompt([
-        'You are an assistant for performing a web search tool use',
-      ]),
-      thinkingConfig: useHaiku
-        ? { type: 'disabled' as const }
-        : context.options.thinkingConfig,
-      tools: [],
-      signal: context.abortController.signal,
-      options: {
-        getToolPermissionContext: async () => appState.toolPermissionContext,
-        model: useHaiku ? getSmallFastModel() : context.options.mainLoopModel,
-        toolChoice: useHaiku ? { type: 'tool', name: 'web_search' } : undefined,
-        isNonInteractiveSession: context.options.isNonInteractiveSession,
-        hasAppendSystemPrompt: !!context.options.appendSystemPrompt,
-        extraToolSchemas: [toolSchema],
-        querySource: 'web_search_tool',
-        agents: context.options.agentDefinitions.activeAgents,
-        mcpTools: [],
-        agentId: context.agentId,
-        effortValue: appState.effortValue,
-      },
-    })
-
-    const allContentBlocks: BetaContentBlock[] = []
-    let currentToolUseId = null
-    let currentToolUseJson = ''
-    let progressCounter = 0
-    const toolUseQueries = new Map() // Map of tool_use_id to query
-
-    for await (const event of queryStream) {
-      if (event.type === 'assistant') {
-        allContentBlocks.push(...event.message.content)
-        continue
-      }
-
-      // Track tool use ID when server_tool_use starts
-      if (
-        event.type === 'stream_event' &&
-        event.event?.type === 'content_block_start'
-      ) {
-        const contentBlock = event.event.content_block
-        if (contentBlock && contentBlock.type === 'server_tool_use') {
-          currentToolUseId = contentBlock.id
-          currentToolUseJson = ''
-          // Note: The ServerToolUseBlock doesn't contain input.query
-          // The actual query comes through input_json_delta events
-          continue
-        }
-      }
-
-      // Accumulate JSON for current tool use
-      if (
-        currentToolUseId &&
-        event.type === 'stream_event' &&
-        event.event?.type === 'content_block_delta'
-      ) {
-        const delta = event.event.delta
-        if (delta?.type === 'input_json_delta' && delta.partial_json) {
-          currentToolUseJson += delta.partial_json
-
-          // Try to extract query from partial JSON for progress updates
-          try {
-            // Look for a complete query field
-            const queryMatch = currentToolUseJson.match(
-              /"query"\s*:\s*"((?:[^"\\]|\\.)*)"/,
-            )
-            if (queryMatch && queryMatch[1]) {
-              // The regex properly handles escaped characters
-              const query = jsonParse('"' + queryMatch[1] + '"')
-
-              if (
-                !toolUseQueries.has(currentToolUseId) ||
-                toolUseQueries.get(currentToolUseId) !== query
-              ) {
-                toolUseQueries.set(currentToolUseId, query)
-                progressCounter++
-                if (onProgress) {
-                  onProgress({
-                    toolUseID: `search-progress-${progressCounter}`,
-                    data: {
-                      type: 'query_update',
-                      query,
-                    },
-                  })
-                }
-              }
-            }
-          } catch {
-            // Ignore parsing errors for partial JSON
-          }
-        }
-      }
-
-      // Yield progress when search results come in
-      if (
-        event.type === 'stream_event' &&
-        event.event?.type === 'content_block_start'
-      ) {
-        const contentBlock = event.event.content_block
-        if (contentBlock && contentBlock.type === 'web_search_tool_result') {
-          // Get the actual query that was used for this search
-          const toolUseId = contentBlock.tool_use_id
-          const actualQuery = toolUseQueries.get(toolUseId) || query
-          const content = contentBlock.content
-
-          progressCounter++
-          if (onProgress) {
-            onProgress({
-              toolUseID: toolUseId || `search-progress-${progressCounter}`,
-              data: {
-                type: 'search_results_received',
-                resultCount: Array.isArray(content) ? content.length : 0,
-                query: actualQuery,
-              },
-            })
-          }
-        }
-      }
-    }
-
-    // Process the final result
-    const endTime = performance.now()
-    const durationSeconds = (endTime - startTime) / 1000
-
-    const data = makeOutputFromSearchResponse(
-      allContentBlocks,
-      query,
-      durationSeconds,
-    )
-    return { data }
+      return await runMcpSearch()
     } catch (error) {
-      if (!hasFirecrawlSearchConfig()) {
+      logError(error instanceof Error ? error : new Error(String(error)))
+      if (!supportsAnthropicServerWebSearch()) {
         throw error
       }
-      logError(error instanceof Error ? error : new Error(String(error)))
-      return runFirecrawlSearch()
     }
+
+    return runAnthropicServerSearch()
   },
   mapToolResultToToolResultBlockParam(output, toolUseID) {
     const { query, results } = output

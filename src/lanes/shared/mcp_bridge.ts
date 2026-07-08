@@ -346,6 +346,8 @@ Tool parameter schemas are authoritative. Before every tool call:
 
 The "STRICT PARAMETERS:" line appended to each tool description summarizes required-vs-optional + types for quick reference.
 
+Deferred tool names may appear in system reminders before their schemas are declared in the current tool list. Do not call a deferred tool from memory. First call ToolSearch with query "select:<ExactToolName>", then call the tool only after its schema is loaded.
+
 When a tool call fails, diagnose first (exit code, error text, what actually exists) before retrying. Don't iterate cosmetic variants of the same call; blind retries burn input tokens. After two same-cause failures, stop and investigate. For unfamiliar CLIs/APIs, check \`--help\` once before invoking — don't guess flags.
 </tool_usage_rules>
 `

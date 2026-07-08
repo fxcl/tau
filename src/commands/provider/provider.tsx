@@ -123,6 +123,7 @@ const MANAGEABLE_PROVIDERS = [
   // Phase 4 (v0.4.0) — 3 full-chat + 3 login-only stubs.
   'kilocode',
   'cline',
+  'clinepass',
   'copilot',
   'kiro',
 ] as const satisfies readonly APIProvider[]
@@ -365,7 +366,12 @@ function usesEmbeddedProviderLogin(provider: ManageableProvider): provider is Ke
     provider === 'opencodego' ||
     provider === 'commandcode' ||
     provider === 'fireworks' ||
-    provider === 'cloudflare'
+    provider === 'cloudflare' ||
+    provider === 'cline' ||
+    provider === 'clinepass' ||
+    provider === 'copilot' ||
+    provider === 'kilocode' ||
+    provider === 'kiro'
   )
 }
 

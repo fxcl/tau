@@ -2,6 +2,7 @@ import { createElement } from 'react'
 import { z } from 'zod/v4'
 
 import { buildTool, type ToolDef } from '../../Tool.js'
+import { PREBUILT_TOOL_TOGGLE_ITEMS } from '../../constants/prebuiltToolToggles.js'
 import { Text } from '../../ink.js'
 import { lazySchema } from '../../utils/lazySchema.js'
 import { TOOL_GUIDE_TOOL_NAME } from './constants.js'
@@ -29,9 +30,9 @@ const DESCRIPTION =
 
 const PROMPT = `Return Tau-native guidance for choosing tools and behavior. This tool is read-only: it never edits files, runs commands, opens browsers, deploys code, or contacts services.
 
-Use when the task could benefit from an explicit workflow decision before acting, especially browser/app verification, codebase exploration, git-history investigation, spec planning, workflow command detection, package work, database/integration work, deploy/expose work, design review, test selection, memory/skill work, or multi-agent delegation.
+Use when the task could benefit from an explicit workflow decision before acting, especially repo context scouting, browser/app verification, codebase exploration, git-history investigation, spec planning, workflow command detection, package work, database/integration work, deploy/expose work, design review, risk-based review/verification, token-safe large-output recovery, test selection, memory/skill work, or multi-agent delegation.
 
-Prefer the workflow-specific Tau tools this guide recommends before falling back to generic Read, Grep, Glob, Bash, or Agent. Use generic tools after the workflow tool has narrowed the target, when the task is a trivial exact-file read/edit, or when the workflow tool is unavailable.
+Prefer the workflow-specific Tau tools this guide recommends before falling back to generic Read, Grep, Glob, Bash, or Agent. Use RepoContextScout for unfamiliar coding work, WorkflowRecipe for reusable orchestration, ChangeRisk before scaling review/verify work, and ToolOutputRetrieve for bounded recovery of compressed tool outputs. Use generic tools after the workflow tool has narrowed the target, when the task is a trivial exact-file read/edit, or when the workflow tool is unavailable.
 
 Do not use Cursor-specific tools, lane names, or behavior. Prefer portable Tau tools and deferred ToolSearch discovery.`
 
@@ -114,10 +115,10 @@ function workflowFor(mode: Mode): Pick<
     case 'browser':
       return {
         summary: 'Verify web/app behavior with the lightest browser-capable surface available.',
-        recommendedTools: ['ToolSearch', 'ProjectWorkflow', 'InspectSite', 'VisualDesignAudit', 'WebFetch', 'WebSearch', 'Computer', 'Bash'],
+        recommendedTools: ['ToolSearch', 'ProjectWorkflow', 'InspectSite', 'WebBrowser', 'VisualDesignAudit', 'WebFetch', 'WebSearch', 'Computer', 'Bash'],
         steps: [
           'Load ProjectWorkflow first to identify the dev/start command, then use InspectSite once a URL is available.',
-          'Use ToolSearch to discover any installed browser automation tool before falling back to generic surfaces.',
+          'Use WebBrowser for simple URL opens, HTTP snapshots, and local HTML artifact snapshots. For local artifacts, pass the returned absolute path or canonical htmlUrl/fileUrl directly; do not hand-build file://.tau/... URLs.',
           'Use WebFetch/WebSearch for public text pages and Computer or shell-driven local browser automation for rendered UI checks.',
           'Capture console, network, screenshot, and interaction evidence when debugging UI behavior.',
         ],
@@ -156,7 +157,7 @@ function workflowFor(mode: Mode): Pick<
     case 'workflow':
       return {
         summary: 'Detect project commands before running build, lint, test, or dev workflows.',
-        recommendedTools: ['ProjectWorkflow', 'PackageManager', 'Read', 'Bash'],
+        recommendedTools: ['WorkflowRecipe', 'ProjectWorkflow', 'PackageManager', 'Read', 'Bash'],
         steps: [
           'Call ProjectWorkflow near the target directory to identify manifests and scripts.',
           'Prefer repo-defined scripts over guessed commands.',
@@ -198,9 +199,10 @@ function workflowFor(mode: Mode): Pick<
     case 'design':
       return {
         summary: 'Pair code inspection with visual verification for UI and design tasks.',
-        recommendedTools: ['VisualDesignAudit', 'InspectSite', 'Read', 'Grep', 'ProjectWorkflow', 'ToolSearch', 'Computer'],
+        recommendedTools: ['VisualDesignAudit', 'InspectSite', 'ArtifactCanvas', 'Read', 'Grep', 'ProjectWorkflow', 'ToolSearch', 'Computer'],
         steps: [
           'Load VisualDesignAudit before finishing frontend work; pair it with InspectSite or browser tools when the app can run.',
+          'Use ArtifactCanvas when the task needs a durable local preview, report, mockup, or review surface.',
           'Find the relevant UI components and styling system first.',
           'Run or open the app and inspect at desktop and mobile sizes when possible.',
           'Check text fit, overlap, assets, and interaction states before finishing.',
@@ -212,7 +214,7 @@ function workflowFor(mode: Mode): Pick<
     case 'test':
       return {
         summary: 'Find related tests and project test commands before editing or verifying.',
-        recommendedTools: ['TestSearch', 'ProjectWorkflow', 'Read', 'Grep', 'Bash'],
+        recommendedTools: ['TestSearch', 'ProjectWorkflow', 'ChangeRisk', 'Read', 'Grep', 'Bash'],
         steps: [
           'Call TestSearch for the changed source or failing test file.',
           'Use ProjectWorkflow to identify the repo-preferred test command.',
@@ -252,7 +254,7 @@ function workflowFor(mode: Mode): Pick<
     case 'multi_agent':
       return {
         summary: 'Delegate only independent work that benefits from separate context.',
-        recommendedTools: ['Agent', 'TaskCreate', 'TaskGet', 'TaskUpdate', 'TaskList'],
+        recommendedTools: ['RepoContextScout', 'WorkflowRecipe', 'Agent', 'ChangeRisk', 'TaskCreate', 'TaskGet', 'TaskUpdate', 'TaskList'],
         steps: [
           'Split research, broad scans, or parallel investigations into clear independent tasks.',
           'Give each agent concrete files, goals, and output expectations.',
@@ -267,17 +269,61 @@ function workflowFor(mode: Mode): Pick<
     default:
       return {
         summary: 'Understand the repo with semantic and text search before changing code.',
-        recommendedTools: ['ToolSearch', 'CodebaseRetrieval', 'LSP', 'Grep', 'Glob', 'Read', 'Agent'],
+        recommendedTools: ['RepoContextScout', 'WorkflowRecipe', 'CodebaseRetrieval', 'LSP', 'Grep', 'Glob', 'Read', 'ChangeRisk', 'ToolOutputRetrieve', 'Agent'],
         steps: [
-          'Use CodeGraph first when the repo has a .codegraph directory; otherwise load CodebaseRetrieval before broad Grep/Glob/Read exploration.',
+          'Use RepoContextScout for unfamiliar coding work; use CodeGraph first when the repo has a .codegraph directory, otherwise let CodebaseRetrieval narrow broad Grep/Glob/Read exploration.',
           'Use LSP for exact symbols and Grep/Glob for literal evidence after CodebaseRetrieval narrows the likely files.',
           'Read the smallest relevant files and call paths before editing.',
+          'Use ChangeRisk after edits to decide whether focused review/verification is enough.',
           'Use Agent for broad independent exploration when it would keep the main context cleaner.',
         ],
         cautions: [
           'Do not rely on one text hit when symbol semantics or call hierarchy matter.',
         ],
       }
+  }
+}
+
+function inactiveOptionalPrebuiltNames(
+  availableToolNames: Set<string>,
+): Set<string> {
+  const inactive = new Set<string>()
+  for (const item of PREBUILT_TOOL_TOGGLE_ITEMS) {
+    if (item.toolNames.some(toolName => availableToolNames.has(toolName))) {
+      continue
+    }
+    inactive.add(item.id)
+    for (const toolName of item.toolNames) inactive.add(toolName)
+    for (const alias of item.aliases ?? []) inactive.add(alias)
+  }
+  return inactive
+}
+
+function mentionsInactiveOptionalTool(
+  text: string,
+  inactiveNames: Set<string>,
+): boolean {
+  for (const name of inactiveNames) {
+    if (text.includes(name)) return true
+  }
+  return false
+}
+
+function pruneUnavailableRecommendations(
+  workflow: Pick<Output, 'summary' | 'recommendedTools' | 'steps' | 'cautions'>,
+  availableToolNames: Set<string>,
+): Pick<Output, 'summary' | 'recommendedTools' | 'steps' | 'cautions'> {
+  const inactiveNames = inactiveOptionalPrebuiltNames(availableToolNames)
+  if (inactiveNames.size === 0) return workflow
+
+  return {
+    ...workflow,
+    recommendedTools: workflow.recommendedTools.filter(
+      tool => !inactiveNames.has(tool),
+    ),
+    steps: workflow.steps.filter(
+      step => !mentionsInactiveOptionalTool(step, inactiveNames),
+    ),
   }
 }
 
@@ -328,9 +374,15 @@ export const ToolGuideTool = buildTool({
   renderToolResultMessage(output) {
     return renderText(output.summary)
   },
-  async call(input) {
+  async call(input, context) {
     const mode = inferMode(input.task, input.mode)
-    const workflow = workflowFor(mode)
+    const availableToolNames = new Set(
+      context.options.tools.map(tool => tool.name),
+    )
+    const workflow = pruneUnavailableRecommendations(
+      workflowFor(mode),
+      availableToolNames,
+    )
     return {
       data: {
         mode,

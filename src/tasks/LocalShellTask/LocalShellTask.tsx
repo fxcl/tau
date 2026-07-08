@@ -11,7 +11,7 @@ import { tailFile } from '../../utils/fsOperations.js';
 import { logError } from '../../utils/log.js';
 import { enqueuePendingNotification } from '../../utils/messageQueueManager.js';
 import type { ShellCommand } from '../../utils/ShellCommand.js';
-import { evictTaskOutput, getTaskOutputPath } from '../../utils/task/diskOutput.js';
+import { ensureTaskOutputFile, evictTaskOutput, getTaskOutputPath } from '../../utils/task/diskOutput.js';
 import { registerTask, updateTaskState } from '../../utils/task/framework.js';
 import { escapeXml } from '../../utils/xml.js';
 import { backgroundAgentTask, isLocalAgentTask } from '../LocalAgentTask/LocalAgentTask.js';
@@ -217,7 +217,16 @@ export async function spawnShellTask(input: LocalShellSpawnInput & {
 
   // Data flows through TaskOutput automatically — no stream listeners needed.
   // Just transition to backgrounded state so the process keeps running.
-  shellCommand.background(taskId);
+  //
+  // background() returns false when the command already terminated and was
+  // never truly backgrounded (e.g. a pre-spawn failure). Its output file may
+  // then not exist, yet the completion <task-notification> below advertises
+  // getTaskOutputPath(taskId). Await an idempotent create so the advertised
+  // path is always readable — keeping the "every registered shell task has a
+  // readable output file" invariant true regardless of how the command failed.
+  if (!shellCommand.background(taskId)) {
+    await ensureTaskOutputFile(taskId);
+  }
   const cancelStallWatchdog = startStallWatchdog(taskId, description, kind, toolUseId, agentId);
   void shellCommand.result.then(async result => {
     cancelStallWatchdog();

@@ -177,6 +177,10 @@ function resolveLoginProviderArg(args: string): APIProvider | null {
     workersai: 'cloudflare',
     workers: 'cloudflare',
     cf: 'cloudflare',
+    clineauth: 'cline',
+    clineaccount: 'cline',
+    clinepass: 'clinepass',
+    clineplus: 'clinepass',
   }
 
   const aliased = aliases[compact] ?? aliases[first]

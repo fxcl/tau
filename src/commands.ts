@@ -52,6 +52,8 @@ import skills from './commands/skills/index.js'
 import status from './commands/status/index.js'
 import tasks from './commands/tasks/index.js'
 import teleport from './commands/teleport/index.js'
+import toolsCommand from './commands/tools/index.js'
+import powerModeCommand from './commands/mode/index.js'
 /* eslint-disable @typescript-eslint/no-require-imports */
 const agentsPlatform =
   process.env.USER_TYPE === 'ant'
@@ -172,6 +174,8 @@ import {
   clearSkillCaches,
   getDynamicSkills,
 } from './skills/loadSkillsDir.js'
+import { getPowerModeFromSettings } from './utils/powerMode.js'
+import { getInitialSettings } from './utils/settings/settings.js'
 import { getBundledSkills } from './skills/bundledSkills.js'
 import { getBuiltinPluginSkillCommands } from './plugins/builtinPlugins.js'
 import {
@@ -380,6 +384,8 @@ const COMMANDS = memoize((): Command[] => [
   passes,
   ...(peersCmd ? [peersCmd] : []),
   tasks,
+  toolsCommand,
+  powerModeCommand,
   ...(workflowsCmd ? [workflowsCmd] : []),
   ...(torch ? [torch] : []),
   ...(process.env.USER_TYPE === 'ant' && !process.env.IS_DEMO
@@ -399,19 +405,30 @@ async function getSkills(cwd: string): Promise<{
   builtinPluginSkills: Command[]
 }> {
   try {
+    // Cheap power mode ignores folder/plugin skills entirely — no directory
+    // scans, no plugin loads. Bundled built-in skills stay user-invocable
+    // (they cost nothing until invoked and back core commands).
+    const cheapMode =
+      getPowerModeFromSettings(getInitialSettings()) === 'cheap'
     const [skillDirCommands, pluginSkills] = await Promise.all([
-      getSkillDirCommands(cwd).catch(err => {
-        logError(toError(err))
-        logForDebugging(
-          'Skill directory commands failed to load, continuing without them',
-        )
-        return []
-      }),
-      getPluginSkills().catch(err => {
-        logError(toError(err))
-        logForDebugging('Plugin skills failed to load, continuing without them')
-        return []
-      }),
+      cheapMode
+        ? Promise.resolve([])
+        : getSkillDirCommands(cwd).catch(err => {
+            logError(toError(err))
+            logForDebugging(
+              'Skill directory commands failed to load, continuing without them',
+            )
+            return []
+          }),
+      cheapMode
+        ? Promise.resolve([])
+        : getPluginSkills().catch(err => {
+            logError(toError(err))
+            logForDebugging(
+              'Plugin skills failed to load, continuing without them',
+            )
+            return []
+          }),
     ])
     // Bundled skills are registered synchronously at startup
     const bundledSkills = getBundledSkills()
@@ -489,13 +506,17 @@ export function meetsAvailabilityRequirement(cmd: Command): boolean {
  * because loading is expensive (disk I/O, dynamic imports).
  */
 const loadAllCommands = memoize(async (cwd: string): Promise<Command[]> => {
+  // Cheap power mode: external plugin commands are ignored along with
+  // plugin/folder skills (gated inside getSkills). /mode clears this memo
+  // on switch so the command list follows the mode.
+  const cheapMode = getPowerModeFromSettings(getInitialSettings()) === 'cheap'
   const [
     { skillDirCommands, pluginSkills, bundledSkills, builtinPluginSkills },
     pluginCommands,
     workflowCommands,
   ] = await Promise.all([
     getSkills(cwd),
-    getPluginCommands(),
+    cheapMode ? Promise.resolve([]) : getPluginCommands(),
     getWorkflowCommands ? getWorkflowCommands(cwd) : Promise.resolve([]),
   ])
 
@@ -541,8 +562,12 @@ function isCoreCommandOverride(
 export async function getCommands(cwd: string): Promise<Command[]> {
   const allCommands = await loadAllCommands(cwd)
 
-  // Get dynamic skills discovered during file operations
-  const dynamicSkills = getDynamicSkills()
+  // Get dynamic skills discovered during file operations. Cheap power mode
+  // ignores them — folder skills are off no matter how they were discovered.
+  const dynamicSkills =
+    getPowerModeFromSettings(getInitialSettings()) === 'cheap'
+      ? []
+      : getDynamicSkills()
 
   // Build base commands without dynamic skills
   const baseCommands = allCommands.filter(

@@ -1,6 +1,7 @@
 import { getCursorModelDisplayName } from '../../lanes/cursor/catalog.js'
 import { getAntigravityModelDisplayName } from '../../services/api/providers/gemini_code_assist.js'
 import { getCommandCodeModelDisplayName } from './commandCodeThinking.js'
+import { getClinePassModelDisplayName } from './clinePassCatalog.js'
 import type { APIProvider } from './providers.js'
 
 export function getProviderModelDisplayName(
@@ -16,6 +17,8 @@ export function getProviderModelDisplayName(
       return getAntigravityModelDisplayName(modelId)
     case 'commandcode':
       return getCommandCodeModelDisplayName(modelId)
+    case 'clinepass':
+      return getClinePassModelDisplayName(modelId)
     default:
       return null
   }
@@ -30,6 +33,8 @@ function getAnthropicModelDisplayName(modelId: string): string | null {
       return 'Claude Opus 4.7'
     case 'claude-opus-4-6':
       return 'Claude Opus 4.6'
+    case 'claude-sonnet-5':
+      return 'Claude Sonnet 5'
     case 'claude-sonnet-4-6':
       return 'Claude Sonnet 4.6'
     case 'claude-haiku-4-5':

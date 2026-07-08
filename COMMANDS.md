@@ -64,6 +64,32 @@ Creates a clean content report for the session in Markdown, PDF, or HTML. This i
 
 ## Features
 
+**`/tools` - Toggle optional prebuilt tools**
+Opens an interactive picker for optional Tau prebuilt tools. Basic agent tools stay fixed. Only available in normal power mode — cheap forces every optional tool off and full forces them all on, so `/tools` is hidden there.
+
+```
+/tools                     open the picker
+/tools off AFT             hide AFT tools from the agent
+/tools on ProjectWorkflow  enable a tool again
+/tools status              print current state
+```
+
+**`/mode` - Switch power mode (cheap / normal / full)**
+One switch for how much machinery Tau loads, with a matching accent color that cross-fades on change.
+
+- `cheap` - core tools only. Optional tools, skills, agents, plugins, MCP, and LSP are all off AND hidden from the model (system prompt and listings included); folder configs (`.claude/skills`, `.claude/agents`, `.mcp.json`, plugins) are ignored. Soft bronze accents.
+- `normal` - default behavior. Your `/tools` toggles apply; MCP, skills, agents, and LSP load as configured. Standard theme.
+- `full` - everything on. Every optional tool is enabled regardless of saved `/tools` toggles. Soft gold accents.
+
+```
+/mode          open the picker (live palette preview)
+/mode cheap    minimal footprint
+/mode normal   back to default
+/mode full     everything on
+```
+
+Saved `/tools` toggles are never rewritten - cheap/full override them while active, and normal restores them (`/tools` itself only appears in normal mode). Switching modes changes the tool set and system prompt once, so the prompt cache re-warms on the next message and then stays stable.
+
 **`/fallback` - Recover automatically**
 Automatic recovery when a model fails mid-session. Configure a fallback and keep working through provider outages.
 

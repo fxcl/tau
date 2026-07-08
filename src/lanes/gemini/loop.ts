@@ -43,11 +43,14 @@ import {
 } from './tools.js'
 import {
   applyAntigravityPrefixPad,
-  freezeAntigravityVolatilePrefix,
-  paceAntigravityAgentRequest,
+  guardAntigravityCommitWindow,
   recordAntigravityCacheRead,
   writeAntigravityCacheDebugEntry,
 } from './antigravity_cache.js'
+import {
+  freezeSessionVolatileText,
+  volatileFreezeKey,
+} from '../shared/volatile_freeze.js'
 import { geminiApi, TAU_STABLE_SESSION_ID_FIELD } from './api.js'
 import { getOrCreateCacheWithUsage, invalidateCache } from '../../services/api/providers/gemini_cache.js'
 import {
@@ -60,6 +63,7 @@ import {
   appendStrictParamsHint,
   GEMINI_TOOL_USAGE_RULES,
 } from '../shared/mcp_bridge.js'
+import { selectGeminiToolsForRequest } from './lazy_tools.js'
 import {
   resolveThinkingBudget as resolveGeminiThinkingBudget,
   resolveThinkingConfig as resolveGeminiThinkingConfig,
@@ -105,7 +109,7 @@ export class GeminiLane implements Lane {
   async *streamAsProvider(
     params: LaneProviderCallParams,
   ): AsyncGenerator<AnthropicStreamEvent, NormalizedUsage> {
-    const { model, messages, system, tools, max_tokens, thinking, signal, sessionId } = params
+    const { model, messages, system, tools, max_tokens, thinking, signal, sessionId, providerHint } = params
 
     // Normalize system → plain string.
     const systemText =
@@ -126,22 +130,36 @@ export class GeminiLane implements Lane {
     const isAntigravityModel = ANTIGRAVITY_MODEL_IDS.has(model.toLowerCase())
     const isAntigravityGemini =
       isAntigravityModel && isAntigravityGeminiModel(model)
-    const volatileText = isAntigravityGemini
-      ? freezeAntigravityVolatilePrefix(
-        antigravityCacheKey(model, sessionId, messages),
-        split.volatileText,
-      )
-      : split.volatileText
+    // Snapshot semantics for EVERY request on this lane, not just Antigravity
+    // Gemini: the API-key and Code Assist paths run Gemini's implicit cache,
+    // which hashes contents[] just like Antigravity's, and Claude resold
+    // through Antigravity anchors its prefix cache on the same leading block.
+    // A fresh volatile block each turn rewrites byte 0 of the conversation
+    // for all of them. See volatile_freeze.ts.
+    // Antigravity Gemini: key the frozen volatile by conversation LINEAGE
+    // (the sessionless fallback = hash of the first user message) instead of
+    // the caller's session id. Context-cloning side queries (tool-use
+    // summaries, away summaries) and full-context agents carry the main
+    // conversation verbatim but arrive under their own synthetic session ids;
+    // per-session keys made each of them freeze a FRESH volatile block,
+    // rewriting byte 0 of an otherwise identical prompt and forking a whole
+    // second cache lineage (live 2026-07-03: a summary side query re-paid
+    // ~38k tokens it would have read from the main session's entries).
+    // Lineage keying hands every clone the main conversation's exact frozen
+    // bytes; standalone agents hash their own first message as before.
+    const volatileText = freezeSessionVolatileText(
+      volatileFreezeKey('gemini', model, isAntigravityGemini ? undefined : sessionId, messages),
+      split.volatileText,
+    )
 
     // Build id→native-name map across the whole conversation so
     // tool_result blocks can find their original Gemini function name.
     const toolUseIdToNative = buildToolUseIdToNativeMap(messages)
 
     // Convert Anthropic-format messages → Gemini native contents.
-    // If we have volatile content, inject it as a leading user message.
-    // API-key Gemini cachedContents can use fresh volatile context here because
-    // contents[] is not part of that cache key. Antigravity's implicit cache
-    // does hash contents[], so volatileText is frozen above before injection.
+    // If we have volatile content, inject it as a leading user message —
+    // FIXED position with frozen bytes (see above), so every implicit cache
+    // reads it as part of the stable prefix instead of a per-turn rewrite.
     const contents = convertHistoryToGemini(messages, toolUseIdToNative)
     if (volatileText) {
       contents.unshift({
@@ -153,7 +171,12 @@ export class GeminiLane implements Lane {
     // Build function declarations: prefer the native schema from our
     // registry for tools that match; pass through provider-shaped tools
     // for anything we don't recognize (MCP tools, custom tools).
-    const functionDeclarations = buildLaneFunctionDeclarations(tools)
+    const requestTools = selectGeminiToolsForRequest(tools, messages, {
+      model,
+      providerHint,
+      sessionId,
+    })
+    const functionDeclarations = buildLaneFunctionDeclarations(requestTools)
 
     // Antigravity's implicit cache content-addresses the whole prompt prefix
     // (systemInstruction → tools → contents), so a real session warms it
@@ -238,13 +261,19 @@ export class GeminiLane implements Lane {
       }
     }
     if (isAntigravityGemini) {
-      // Hold an agent's second request until its first cache write has had
-      // time to commit (async) — without this, fast tool loops re-pay the
-      // full prompt cold on every turn. Agent sessions only (gated inside by
-      // the tau-agent- prefix); the main thread's human cadence already
-      // clears the commit window. Gemini-only: the Claude-on-Antigravity
-      // cache has a much lower minimum and never needs pacing.
-      await paceAntigravityAgentRequest(sessionId, signal)
+      // Session-start commit-window guard: the 2nd/3rd requests of a session
+      // go FULL COLD when they fire before the first write commits (~8-22s
+      // async) — live-measured, each miss re-pays the whole ~20-30k prompt.
+      // Holds only over-minimum prompts, at most twice per session, and
+      // latches off on the first observed hit, so steady-state turns are
+      // never delayed. Subsumes the opt-in maxCache agent pacing (padded
+      // agent prompts pass the size gate). Gemini-only: Claude-on-Antigravity
+      // uses a low-minimum cache that never needs this.
+      await guardAntigravityCommitWindow(
+        sessionId,
+        signal,
+        JSON.stringify(request).length,
+      )
     }
 
     // Track usage across the stream.
@@ -1047,16 +1076,6 @@ function stableAntigravitySessionId(
 ): string {
   const source = sessionId?.trim() || firstUserTextFromMessages(messages)
   return stableNegativeHash(source || JSON.stringify(messages.map(msg => msg.role)))
-}
-
-function antigravityCacheKey(
-  model: string,
-  sessionId: string | undefined,
-  messages: import('../../services/api/providers/base_provider.js').ProviderMessage[],
-): string {
-  const sessionKey =
-    sessionId?.trim() || stableAntigravitySessionId(undefined, messages)
-  return `${model.toLowerCase()}:${sessionKey}`
 }
 
 function firstUserTextFromMessages(

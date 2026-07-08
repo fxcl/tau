@@ -57,7 +57,7 @@ interface KiroToolSpec {
 
 interface KiroToolResult {
   toolUseId: string
-  status: 'success'
+  status: 'success' | 'error'
   content: Array<{ text: string }>
 }
 
@@ -794,7 +794,7 @@ function _extractUserBlocks(content: string | ProviderContentBlock[]): {
     } else if (block.type === 'tool_result' && block.tool_use_id) {
       toolResults.push({
         toolUseId: block.tool_use_id,
-        status: 'success',
+        status: block.is_error ? 'error' : 'success',
         content: [{ text: _stringifyToolResultContent(block.content) }],
       })
     }

@@ -8,6 +8,7 @@
 
 import memoize from 'lodash-es/memoize.js'
 import { getFeatureValue_CACHED_MAY_BE_STALE } from '../services/analytics/growthbook.js'
+import { isAntigravityModelId } from '../services/api/providers/gemini_code_assist.js'
 import {
   type AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
   logEvent,
@@ -161,6 +162,105 @@ const getDeferredToolTokenCount = memoize(
  */
 export type ToolSearchMode = 'tst' | 'tst-auto' | 'standard'
 
+const OPENAI_COMPAT_NATIVE_TOOL_SEARCH_PROVIDERS = new Set([
+  'openrouter',
+  'agentrouter',
+  'modelrouter',
+  'vercel',
+  'requesty',
+  'opencode',
+  'opencodego',
+  'fireworks',
+  'cloudflare',
+  'groq',
+  'mistral',
+  'nim',
+  'deepseek',
+  'glm',
+  'moonshot',
+  'minimax',
+  'ollama',
+  'lmstudio',
+  'copilot',
+  'iflow',
+])
+
+function nativeLaneEnabledByEnv(laneName: string, provider: string): boolean {
+  const raw = process.env.CLAUDEX_NATIVE_LANES
+  if (!raw) return true
+
+  const normalized = raw.toLowerCase().trim()
+  if (
+    normalized === 'off' ||
+    normalized === 'legacy' ||
+    normalized === '0' ||
+    normalized === 'false'
+  ) {
+    return false
+  }
+  if (normalized === 'all' || normalized === '1' || normalized === 'true') {
+    return true
+  }
+
+  const tokens = normalized.split(/[,\s]+/).filter(Boolean)
+  const disabled = new Set(
+    tokens.filter(t => t.startsWith('-')).map(t => t.slice(1)),
+  )
+  if (disabled.has(laneName) || disabled.has(provider)) return false
+
+  const enabled = tokens.filter(t => !t.startsWith('-'))
+  return enabled.length === 0 || enabled.includes(laneName) || enabled.includes(provider)
+}
+
+/**
+ * Native non-Anthropic lanes have their own tool-loading path. This is not
+ * Anthropic `defer_loading` / `tool_reference` support: Tau keeps ToolSearch
+ * available, filters deferred schemas before the native request, then loads
+ * matched schemas into later native tool/function declarations.
+ *
+ * Pass the request `model` when known: the gemini lane's own selector
+ * declines lazy tools for Antigravity models (exact-prefix implicit cache —
+ * any tool-block change voids the whole conversation cache, see
+ * lanes/gemini/lazy_tools.ts), and this upstream gate must agree. Without the
+ * model check, claude.ts filtered undiscovered deferred tools out of
+ * Antigravity requests before the lane ever ran, so the lane opt-out
+ * protected nothing: core tools (TaskCreate, AskUserQuestion, WebFetch, …)
+ * were missing until "discovered" — models called them blind and looped on
+ * hallucinated schemas — and every discovery churned the cached prefix.
+ */
+export function isNativeLaneToolSearchEnabled(model?: string): boolean {
+  const provider = getAPIProvider()
+  const laneName = provider === 'gemini'
+    ? 'gemini'
+    : OPENAI_COMPAT_NATIVE_TOOL_SEARCH_PROVIDERS.has(provider)
+      ? 'openai-compat'
+      : null
+
+  if (!laneName) return false
+  if (!nativeLaneEnabledByEnv(laneName, provider)) return false
+  if (isEnvDefinedFalsy(process.env.ENABLE_TOOL_SEARCH)) return false
+  if (parseAutoPercentage(process.env.ENABLE_TOOL_SEARCH ?? '') === 100) {
+    return false
+  }
+  if (isEnvDefinedFalsy(process.env.TAU_NATIVE_LAZY_TOOLS)) return false
+  if (
+    provider === 'gemini' &&
+    isEnvDefinedFalsy(process.env.TAU_GEMINI_LAZY_TOOLS)
+  ) {
+    return false
+  }
+  // Mirror shouldUseGeminiNativeLazyTools' Antigravity opt-out — one shared
+  // predicate so the two gates can't drift apart again.
+  if (provider === 'gemini' && model && isAntigravityModelId(model)) {
+    return false
+  }
+  return true
+}
+
+export function isGeminiNativeToolSearchEnabled(model?: string): boolean {
+  return getAPIProvider() === 'gemini' && isNativeLaneToolSearchEnabled(model)
+}
+
 /**
  * Determines the tool search mode from ENABLE_TOOL_SEARCH.
  *
@@ -279,6 +379,16 @@ export function modelSupportsToolReference(model: string): boolean {
 let loggedOptimistic = false
 
 export function isToolSearchEnabledOptimistic(): boolean {
+  if (isNativeLaneToolSearchEnabled()) {
+    if (!loggedOptimistic) {
+      loggedOptimistic = true
+      logForDebugging(
+        `[ToolSearch:optimistic] provider=gemini native_lazy=true, ENABLE_TOOL_SEARCH=${process.env.ENABLE_TOOL_SEARCH}, result=true`,
+      )
+    }
+    return true
+  }
+
   const mode = getToolSearchMode()
   if (mode === 'standard') {
     if (!loggedOptimistic) {
@@ -533,13 +643,15 @@ function isToolResultBlockWithContent(obj: unknown): obj is ToolResultBlock {
 }
 
 /**
- * Extract tool names from tool_reference blocks in message history.
+ * Extract tool names from tool_reference and tool_use blocks in message history.
  *
  * When dynamic tool loading is enabled, MCP tools are not predeclared in the
  * tools array. Instead, they are discovered via ToolSearchTool which returns
- * tool_reference blocks. This function scans the message history to find all
- * tool names that have been referenced, so we can include only those tools
- * in subsequent API requests.
+ * tool_reference blocks. Models can also sometimes directly call a deferred
+ * tool by name before seeing its schema. That call may fail validation, but
+ * the assistant tool_use is still strong evidence that the tool must be loaded
+ * on the next retry. This function scans both forms so the next API request
+ * includes the full schema without requiring a ToolSearch round-trip.
  *
  * This approach:
  * - Eliminates the need to predeclare all MCP tools upfront
@@ -550,8 +662,8 @@ function isToolResultBlockWithContent(obj: unknown): obj is ToolResultBlock {
  * on the boundary marker; this scan reads it back. Snip instead protects the
  * tool_reference-carrying messages from removal.
  *
- * @param messages Array of messages that may contain tool_result blocks with tool_reference content
- * @returns Set of tool names that have been discovered via tool_reference blocks
+ * @param messages Array of messages that may contain tool_result/tool_use blocks
+ * @returns Set of tool names discovered via tool_reference or direct tool_use blocks
  */
 export function extractDiscoveredToolNames(messages: Message[]): Set<string> {
   const discoveredTools = new Set<string>()
@@ -566,6 +678,21 @@ export function extractDiscoveredToolNames(messages: Message[]): Set<string> {
       if (carried) {
         for (const name of carried) discoveredTools.add(name)
         carriedFromBoundary += carried.length
+      }
+      continue
+    }
+
+    if (msg.type === 'assistant') {
+      const content = msg.message?.content
+      if (!Array.isArray(content)) continue
+      for (const block of content) {
+        if (
+          block.type === 'tool_use' &&
+          typeof block.name === 'string' &&
+          block.name.length > 0
+        ) {
+          discoveredTools.add(block.name)
+        }
       }
       continue
     }

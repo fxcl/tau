@@ -421,6 +421,41 @@ export function initTaskOutput(taskId: string): Promise<string> {
 }
 
 /**
+ * Ensure a task's output file exists, without truncating it if it already does.
+ *
+ * Idempotent, unlike initTaskOutput (whose O_EXCL create rejects when the file
+ * exists). Used to guarantee the invariant that every registered background
+ * task has a readable output file: normal spawns open the file before the child
+ * runs (Shell.ts), but a command that fails *before* spawning (missing workdir,
+ * deleted cwd → createFailedCommand) never opens it. Without this, the
+ * completion <task-notification> advertises an output_file path that does not
+ * exist, and both TaskOutput recovery and ToolOutputRetrieve then fail to read
+ * it (missing bn42uzmxr.output edge case).
+ */
+export function ensureTaskOutputFile(taskId: string): Promise<string> {
+  return track(
+    (async () => {
+      await ensureOutputDir()
+      const outputPath = getTaskOutputPath(taskId)
+      // 'a' / O_APPEND|O_CREAT creates the file when missing and never
+      // truncates an existing one. O_NOFOLLOW mirrors initTaskOutput's
+      // symlink-hardening (shell output paths are always regular files).
+      const fh = await open(
+        outputPath,
+        process.platform === 'win32'
+          ? 'a'
+          : fsConstants.O_WRONLY |
+              fsConstants.O_APPEND |
+              fsConstants.O_CREAT |
+              O_NOFOLLOW,
+      )
+      await fh.close()
+      return outputPath
+    })(),
+  )
+}
+
+/**
  * Initialize output file as a symlink to another file (e.g., agent transcript).
  * Tries to create the symlink first; if a file already exists, removes it and retries.
  */

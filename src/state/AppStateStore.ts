@@ -34,6 +34,7 @@ import type { ModelSetting } from '../utils/model/model.js'
 import type { DenialTrackingState } from '../utils/permissions/denialTracking.js'
 import type { PermissionMode } from '../utils/permissions/PermissionMode.js'
 import { getInitialSettings } from '../utils/settings/settings.js'
+import { seedSessionPowerMode } from '../utils/powerMode.js'
 import type { SettingsJson } from '../utils/settings/types.js'
 import { shouldEnableThinkingByDefault } from '../utils/thinking.js'
 import type { Store } from './store.js'
@@ -465,8 +466,16 @@ export function getDefaultAppState(): AppState {
       ? 'plan'
       : 'default'
 
+  // Pin this session's power mode from the persisted setting on first app-state
+  // construction. After this, external edits to the shared settings.json (e.g.
+  // another concurrently running session's /mode, applied live by the settings
+  // watcher) no longer change this session's mode. Idempotent, so /clear
+  // rebuilding app state keeps the mode this session is already running in.
+  const initialSettings = getInitialSettings()
+  seedSessionPowerMode(initialSettings)
+
   return {
-    settings: getInitialSettings(),
+    settings: initialSettings,
     tasks: {},
     agentNameRegistry: new Map(),
     verbose: false,

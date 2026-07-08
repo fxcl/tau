@@ -1,5 +1,6 @@
 import { getMainLoopModelOverride } from '../../bootstrap/state.js'
 import { loadOpenCodeApiKeyFromAuthFile } from '../opencodeAuth.js'
+import { isConcreteOpenAIGptModelForProvider } from './openaiGptModels.js'
 import type { ModelName } from './model.js'
 import type { APIProvider } from './providers.js'
 
@@ -545,6 +546,33 @@ export const PROVIDER_CONFIGS: Record<string, ProviderModelConfig> = {
 
   // Fireworks AI — OpenAI-compatible serverless inference for open-weight
   // models. Model ids are fully-qualified (accounts/fireworks/models/<name>).
+  clinepass: {
+    displayName: 'Cline Pass',
+    baseUrl: process.env.CLINE_PASS_BASE_URL ?? process.env.CLINE_BASE_URL ?? 'https://api.cline.bot/v1',
+    authType: 'bearer',
+    apiKeyEnv: 'CLINE_PASS_OAUTH_TOKEN',
+    supportsStreaming: true,
+    supportsToolCalling: true,
+    defaultTier: 'pro',
+    tiers: {
+      free: {
+        opus:   process.env.CLINE_PASS_MODEL_OPUS_FREE   ?? 'cline-pass/qwen3.7-max',
+        sonnet: process.env.CLINE_PASS_MODEL_SONNET_FREE ?? 'cline-pass/qwen3.7-plus',
+        haiku:  process.env.CLINE_PASS_MODEL_HAIKU_FREE  ?? 'cline-pass/deepseek-v4-flash',
+      },
+      pro: {
+        opus:   process.env.CLINE_PASS_MODEL_OPUS   ?? 'cline-pass/qwen3.7-max',
+        sonnet: process.env.CLINE_PASS_MODEL_SONNET ?? 'cline-pass/qwen3.7-plus',
+        haiku:  process.env.CLINE_PASS_MODEL_HAIKU  ?? 'cline-pass/deepseek-v4-flash',
+      },
+      plus: {
+        opus:   process.env.CLINE_PASS_MODEL_OPUS   ?? 'cline-pass/qwen3.7-max',
+        sonnet: process.env.CLINE_PASS_MODEL_SONNET ?? 'cline-pass/qwen3.7-plus',
+        haiku:  process.env.CLINE_PASS_MODEL_HAIKU  ?? 'cline-pass/deepseek-v4-flash',
+      },
+    },
+  },
+
   fireworks: {
     displayName: 'Fireworks AI',
     baseUrl: FIREWORKS_BASE_URL,
@@ -833,23 +861,27 @@ export function getProviderModelSet(provider: string): TierModelSet {
   const modelSet = config.tiers[tier]
   const currentOpenAIModel = getCurrentOpenAIModelSelection(provider)
   if (!currentOpenAIModel) return modelSet
+  const opusOverride =
+    provider === 'openrouter' ? process.env.OR_MODEL_OPUS : process.env.OPENAI_MODEL_OPUS
+  const sonnetOverride =
+    provider === 'openrouter' ? process.env.OR_MODEL_SONNET : process.env.OPENAI_MODEL_SONNET
 
   return {
     ...modelSet,
-    opus: process.env.OPENAI_MODEL_OPUS ?? currentOpenAIModel,
-    sonnet: process.env.OPENAI_MODEL_SONNET ?? currentOpenAIModel,
+    opus: opusOverride ?? currentOpenAIModel,
+    sonnet: sonnetOverride ?? currentOpenAIModel,
   }
 }
 
 function getCurrentOpenAIModelSelection(provider: string): string | null {
-  if (provider !== 'openai') return null
+  if (provider !== 'openai' && provider !== 'openrouter') return null
 
   const selected = getMainLoopModelOverride()
   if (selected !== undefined) {
-    return looksLikeConcreteOpenAIModelId(selected) ? selected : null
+    return isConcreteOpenAIGptModelForProvider(selected, provider) ? selected : null
   }
 
-  if (looksLikeConcreteOpenAIModelId(process.env.ANTHROPIC_MODEL)) {
+  if (isConcreteOpenAIGptModelForProvider(process.env.ANTHROPIC_MODEL, provider)) {
     return process.env.ANTHROPIC_MODEL
   }
 
@@ -859,14 +891,10 @@ function getCurrentOpenAIModelSelection(provider: string): string | null {
       getSettings_DEPRECATED?: () => { model?: unknown } | undefined
     }
     const settings = settingsMod.getSettings_DEPRECATED?.()
-    return looksLikeConcreteOpenAIModelId(settings?.model) ? settings.model : null
+    return isConcreteOpenAIGptModelForProvider(settings?.model, provider) ? settings.model : null
   } catch {
     return null
   }
-}
-
-function looksLikeConcreteOpenAIModelId(value: unknown): value is string {
-  return typeof value === 'string' && value.toLowerCase().startsWith('gpt-')
 }
 
 /**

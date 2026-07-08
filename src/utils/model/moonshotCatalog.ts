@@ -1,81 +1,53 @@
 import type { ModelInfo } from '../../services/api/providers/base_provider.js'
 
-export const MOONSHOT_MODELS: readonly ModelInfo[] = [
-  {
-    id: 'kimi-k2.6',
-    name: 'Kimi K2.6',
-    contextWindow: 262_144,
-    supportsToolCalling: true,
-    tags: ['recommended', 'reasoning'],
-  },
-  {
-    id: 'kimi-k2.5',
-    name: 'Kimi K2.5',
-    contextWindow: 262_144,
-    supportsToolCalling: true,
-    tags: ['reasoning'],
-  },
-  {
-    id: 'kimi-k2-thinking',
-    name: 'Kimi K2 Thinking',
-    contextWindow: 262_144,
-    supportsToolCalling: true,
-    tags: ['reasoning'],
-  },
-  {
-    id: 'kimi-k2-thinking-turbo',
-    name: 'Kimi K2 Thinking Turbo',
-    contextWindow: 262_144,
-    supportsToolCalling: true,
-    tags: ['fast', 'reasoning'],
-  },
-  {
-    id: 'kimi-k2-turbo-preview',
-    name: 'Kimi K2 Turbo',
-    contextWindow: 262_144,
-    supportsToolCalling: true,
-    tags: ['fast'],
-  },
-  {
-    id: 'kimi-k2-0905-preview',
-    name: 'Kimi K2 0905',
-    contextWindow: 262_144,
-    supportsToolCalling: true,
-  },
-  {
-    id: 'kimi-k2-0711-preview',
-    name: 'Kimi K2 0711',
-    contextWindow: 131_072,
-    supportsToolCalling: true,
-  },
-] as const
-
-const MOONSHOT_MODEL_META = new Map(
-  MOONSHOT_MODELS.map(model => [model.id, model] as const),
-)
-
-export function cloneMoonshotModelInfo(model: ModelInfo): ModelInfo {
-  return {
-    ...model,
-    tags: model.tags ? [...model.tags] : undefined,
+export type MoonshotCatalogModel = Partial<ModelInfo> & {
+  id?: string
+  name?: string
+  context_length?: number
+  context_window?: number
+  max_context_length?: number
+  supports_reasoning?: boolean
+  supports_tool_calling?: boolean
+  tags?: readonly string[]
+  capabilities?: {
+    function_calling?: boolean
   }
 }
 
-export function toMoonshotModelInfo(model: { id: string; name?: string }): ModelInfo {
-  const id = model.id.trim()
-  const known = MOONSHOT_MODEL_META.get(id.toLowerCase())
-  if (known) {
-    return {
-      ...cloneMoonshotModelInfo(known),
-      name: model.name && model.name.trim() ? model.name.trim() : known.name,
-    }
+export function filterMoonshotModelCatalog(
+  models: readonly MoonshotCatalogModel[],
+): ModelInfo[] {
+  const seen = new Set<string>()
+  const out: ModelInfo[] = []
+  for (const model of models) {
+    if (typeof model.id !== 'string') continue
+    const id = model.id.trim()
+    const key = id.toLowerCase()
+    if (!isMoonshotChatModelId(id) || seen.has(key)) continue
+    seen.add(key)
+    out.push(toMoonshotModelInfo({ ...model, id }))
   }
+  return out
+}
+
+export function toMoonshotModelInfo(
+  model: MoonshotCatalogModel & { id: string },
+): ModelInfo {
+  const id = model.id.trim()
+  const contextWindow =
+    numberOrUndefined(model.contextWindow)
+    ?? numberOrUndefined(model.context_length)
+    ?? numberOrUndefined(model.context_window)
+    ?? numberOrUndefined(model.max_context_length)
+  const tags = normalizeMoonshotTags(model, id)
 
   return {
     id,
     name: model.name && model.name.trim() ? model.name.trim() : humanizeMoonshotModelId(id),
+    ...(contextWindow !== undefined ? { contextWindow } : {}),
     supportsToolCalling: true,
-    ...(looksLikeMoonshotThinkingModel(id) ? { tags: ['reasoning'] as const } : {}),
+    ...(model.provider ? { provider: model.provider } : {}),
+    ...(tags.length > 0 ? { tags } : {}),
   }
 }
 
@@ -100,6 +72,29 @@ function looksLikeMoonshotThinkingModel(id: string): boolean {
   return normalized.includes('kimi-k2-thinking')
     || normalized === 'kimi-k2.5'
     || normalized === 'kimi-k2.6'
+}
+
+function normalizeMoonshotTags(
+  model: MoonshotCatalogModel,
+  id: string,
+): string[] {
+  const tags = new Set<string>()
+  for (const tag of model.tags ?? []) {
+    if (typeof tag === 'string' && tag.trim()) tags.add(tag.trim())
+  }
+  if (model.supports_reasoning === true || looksLikeMoonshotThinkingModel(id)) {
+    tags.add('reasoning')
+  }
+  if (id.toLowerCase().includes('turbo') || id.toLowerCase().includes('highspeed')) {
+    tags.add('fast')
+  }
+  return Array.from(tags)
+}
+
+function numberOrUndefined(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
+    ? value
+    : undefined
 }
 
 function humanizeMoonshotModelId(id: string): string {

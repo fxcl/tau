@@ -3802,6 +3802,15 @@ Read the team config to discover your teammates' names. Check the task list peri
         }),
       ])
     }
+    case 'power_mode_change': {
+      const content =
+        attachment.mode === 'cheap'
+          ? `Power mode is now 'cheap': only core file, shell, search, and task tools are available. Skills, subagents (the Agent tool), MCP servers and their tools, plugins, and optional tools are all unavailable. Any skills, agent types, or MCP server instructions listed earlier in this conversation no longer apply — do not reference, offer, or attempt to use them.`
+          : `Power mode is now '${attachment.mode}': skills, subagents, and MCP tools are available again. Skills, agent types, and MCP server instructions listed earlier in this conversation apply once more${attachment.mode === 'full' ? ', and all optional tools are enabled' : ''}.`
+      return wrapMessagesInSystemReminder([
+        createUserMessage({ content, isMeta: true }),
+      ])
+    }
     case 'queued_command': {
       // Prefer explicit origin carried from the queue; fall back to commandMode
       // for task notifications (which predate origin).

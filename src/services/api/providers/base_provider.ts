@@ -6,6 +6,8 @@
  * loop, MCP tools, and streaming renderer work unchanged.
  */
 
+import type { QuerySource } from '../../../constants/querySource.js'
+
 export interface ProviderStreamResult {
   [Symbol.asyncIterator](): AsyncIterator<AnthropicStreamEvent>
   /** Collect all events and return the final assembled message */
@@ -144,6 +146,9 @@ export interface ProviderRequestParams {
   /** Provider-side cache/session affinity key. Used by native lanes that can
    * route repeated requests to the same prompt-cache backend. */
   sessionId?: string
+  /** Caller source used by lane bridges to derive an isolated cache key when
+   * no explicit provider-side sessionId is present. */
+  querySource?: QuerySource | string
   /**
    * Anthropic-format thinking param. Individual providers translate this
    * into their native reasoning/thinking flag (OpenAI `reasoning_effort`,
@@ -192,6 +197,12 @@ export interface ProviderTool {
   name: string
   description?: string
   input_schema: Record<string, unknown>
+  /**
+   * Tau-internal, non-enumerable marker added while building provider tool
+   * schemas. Native lanes can use it for provider-specific lazy-loading
+   * decisions without serializing the marker onto the wire.
+   */
+  __tau_should_defer?: boolean
 }
 
 // ─── Helper: Build a ProviderStreamResult from an async iterable ────

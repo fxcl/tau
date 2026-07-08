@@ -8,11 +8,8 @@
 import { OpenAIProvider } from './openai_provider.js'
 import type { ModelInfo, ProviderConfig } from './base_provider.js'
 import {
-  MOONSHOT_MODELS,
-  cloneMoonshotModelInfo,
-  isMoonshotChatModelId,
+  filterMoonshotModelCatalog,
   normalizeMoonshotModelId,
-  toMoonshotModelInfo,
 } from '../../../utils/model/moonshotCatalog.js'
 
 export class MoonshotProvider extends OpenAIProvider {
@@ -28,27 +25,35 @@ export class MoonshotProvider extends OpenAIProvider {
   }
 
   async listModels(): Promise<ModelInfo[]> {
-    try {
-      const response = await fetch(`${this.baseUrl}/models`, {
-        headers: this._headers(),
-        signal: AbortSignal.timeout(8_000),
-      })
-      if (response.ok) {
-        const data = (await response.json()) as { data?: Array<{ id?: string; name?: string }> }
-        const apiModels = (data.data ?? [])
-          .flatMap(model => {
-            if (typeof model.id !== 'string' || !isMoonshotChatModelId(model.id)) {
-              return []
-            }
-            return [toMoonshotModelInfo({ id: model.id, name: model.name })]
-          })
-        if (apiModels.length > 0) return apiModels
-      }
-    } catch {
-      // API unreachable or token cannot list models; use curated fallback.
+    const response = await fetch(`${this.baseUrl}/models`, {
+      headers: this._headers(),
+      signal: AbortSignal.timeout(8_000),
+    })
+    if (!response.ok) {
+      const detail = await response.text().catch(() => '')
+      throw new Error(
+        `Moonshot /models request failed with HTTP ${response.status}${detail ? `: ${detail}` : ''}`,
+      )
     }
 
-    return MOONSHOT_MODELS.map(cloneMoonshotModelInfo)
+    const data = (await response.json()) as {
+      data?: Array<{
+        id?: string
+        name?: string
+        context_length?: number
+        context_window?: number
+        max_context_length?: number
+        supports_reasoning?: boolean
+        supports_tool_calling?: boolean
+        tags?: readonly string[]
+      }>
+    }
+    const apiModels = filterMoonshotModelCatalog(data.data ?? [])
+    if (apiModels.length === 0) {
+      throw new Error('Moonshot /models returned no chat models.')
+    }
+
+    return apiModels
   }
 
   resolveModel(claudeModel: string): string {

@@ -268,6 +268,71 @@ async function main(): Promise<void> {
     }
   })
 
+  await test('recovers a cd target expressed relative to an ancestor of cwd', () => {
+    // cwd is .../todo-app/backend but the model wrote `cd todo-app/frontend`
+    // (as if cwd were the project root). The literal path does not exist; the
+    // sibling frontend does, reachable by resolving the same relative path
+    // against the grandparent. This is the reported real-world failure.
+    const root = mkdtempSync(join(tmpdir(), 'tau-workdir-ancestor-'))
+    try {
+      const backend = join(root, 'todo-app', 'backend')
+      const frontend = join(root, 'todo-app', 'frontend')
+      mkdirSync(backend, { recursive: true })
+      mkdirSync(frontend, { recursive: true })
+      const result = normalizeBashExecutionInput(
+        { command: 'cd todo-app/frontend && npm run dev' },
+        backend,
+        getPlatform(),
+      )
+      assert(result.command === 'npm run dev', 'expected cd to be stripped')
+      assert(result.workdir === frontend, `expected ${frontend}, got ${result.workdir}`)
+      assert(result._workdirFromCd === true, 'expected _workdirFromCd flag')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  await test('recovers a sibling directory from the nearest ancestor', () => {
+    // `cd frontend` from .../todo-app/backend → the sibling one level up wins.
+    const root = mkdtempSync(join(tmpdir(), 'tau-workdir-sibling-'))
+    try {
+      const backend = join(root, 'todo-app', 'backend')
+      const frontend = join(root, 'todo-app', 'frontend')
+      mkdirSync(backend, { recursive: true })
+      mkdirSync(frontend, { recursive: true })
+      const result = normalizeBashExecutionInput(
+        { command: 'cd frontend && npm test' },
+        backend,
+        getPlatform(),
+      )
+      assert(result.command === 'npm test', 'expected cd to be stripped')
+      assert(result.workdir === frontend, `expected ${frontend}, got ${result.workdir}`)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  await test('does not redirect a cd target that exists nowhere', () => {
+    // No ancestor holds the target — keep the lexical (nonexistent) workdir so
+    // the shell surfaces its clear "workdir does not exist" error.
+    const root = mkdtempSync(join(tmpdir(), 'tau-workdir-nomatch-'))
+    try {
+      const backend = join(root, 'todo-app', 'backend')
+      mkdirSync(backend, { recursive: true })
+      const result = normalizeBashExecutionInput(
+        { command: 'cd frontend && npm test' },
+        backend,
+        getPlatform(),
+      )
+      assert(
+        result.workdir === join(backend, 'frontend'),
+        `expected lexical ${join(backend, 'frontend')}, got ${result.workdir}`,
+      )
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
   console.log(`\n${passed} passed, ${failed} failed`)
   if (failed > 0) process.exit(1)
 }

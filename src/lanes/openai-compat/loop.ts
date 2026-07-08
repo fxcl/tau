@@ -6,7 +6,7 @@
  *   - Groq         (strip cache_control / $schema / null function_call; `reasoning` → thinking; fake_stream when JSON mode)
  *   - NVIDIA NIM   (strip stream_options; per-model param filtering)
  *   - Ollama       (no API key; Ollama-specific params; strip stream_options)
- *   - OpenRouter   (session_id + broad message/tool cache_control breakpoints; volatile context kept out of cacheable prefix)
+ *   - OpenRouter   (session_id + rolling message/tool cache_control breakpoints; single quantized anchor for Gemini; volatile context kept out of cacheable prefix)
  *   - Mistral      (strip $id / $schema / additionalProperties / strict; tool_choice "required" → "any")
  *   - Generic long-tail (Fireworks, Together, Deepinfra, xAI, etc.)
  *
@@ -32,6 +32,18 @@ import type {
 import { OPENAI_COMPAT_TOOL_REGISTRY, selectEditToolSet } from './tools.js'
 import { getCompatShellDescription } from './shell_descriptions.js'
 import { filterToSingleShell } from './single_shell.js'
+import { selectOpenAICompatToolsForRequest } from './lazy_tools.js'
+import { recordCompatCacheDebug } from './cache_debug.js'
+import {
+  freezeSessionVolatileText,
+  volatileFreezeKey,
+} from '../shared/volatile_freeze.js'
+import { recordOpenRouterServedProvider } from './transformers/openrouter.js'
+import {
+  OPENROUTER_VOLATILE_CONTEXT,
+  applyGeminiOpenRouterCacheAnchor,
+  isGeminiOnOpenRouter,
+} from './or_gemini_cache.js'
 import { getPlatform } from '../../utils/platform.js'
 import { getPowerShellEdition } from '../../utils/shell/powershellDetection.js'
 import {
@@ -60,6 +72,12 @@ import {
 import { cloudflareReasoningContentReplayRequired } from '../../utils/model/cloudflareThinking.js'
 import { recordProviderModelContextWindows } from '../../utils/model/contextWindows.js'
 import { providerUsesStableRequestSession } from '../../services/api/cacheAffinity.js'
+import {
+  AFT_AST_SEARCH_TOOL_NAME,
+  AFT_DIAGNOSTICS_TOOL_NAME,
+  AFT_OUTLINE_TOOL_NAME,
+  AFT_ZOOM_TOOL_NAME,
+} from '../../tools/AFTTool/constants.js'
 
 // ─── Provider Detection ──────────────────────────────────────────
 
@@ -87,8 +105,6 @@ type ProviderType =
   | 'kilocode'
   | 'copilot'
   | 'generic'
-
-const OPENROUTER_VOLATILE_CONTEXT = Symbol('openrouter volatile context')
 
 function detectProvider(model: string, baseUrl: string): ProviderType {
   const b = baseUrl.toLowerCase()
@@ -373,7 +389,7 @@ export class OpenAICompatLane implements Lane {
   async *streamAsProvider(
     params: LaneProviderCallParams,
   ): AsyncGenerator<AnthropicStreamEvent, NormalizedUsage> {
-    const { model: requestedModel, messages, system, tools, max_tokens, thinking, temperature, stop_sequences, signal, sessionId, providerHint } = params
+    const { model: requestedModel, messages, system, tools, max_tokens, thinking, temperature, stop_sequences, signal, sessionId, providerHint, querySource } = params
     const model = !providerHint || providerHint === 'openrouter'
       ? resolveOpenRouterVirtualModelId(requestedModel)
       : requestedModel
@@ -436,7 +452,11 @@ export class OpenAICompatLane implements Lane {
     // + git-bash). Frontier lanes handle two shells fine; weak compat
     // models routinely pick the wrong one and emit cross-shell syntax,
     // so the lane picks for them. See single_shell.ts for selection.
-    const filteredTools = filterToSingleShell(perModelFilteredTools)
+    const filteredTools = selectOpenAICompatToolsForRequest(
+      filterToSingleShell(perModelFilteredTools),
+      messages,
+      sessionId,
+    )
 
     // Resolve the PowerShell edition once per request (memoized in
     // powershellDetection.ts; subsequent requests hit the cache). We
@@ -470,7 +490,12 @@ export class OpenAICompatLane implements Lane {
 
     // History conversion → OpenAI Chat Completions messages.
     const chatMessages = provider === 'openrouter'
-      ? convertHistoryToOpenAIForOpenRouter(messages, systemText, model)
+      ? convertHistoryToOpenAIForOpenRouter(
+          messages,
+          systemText,
+          model,
+          cacheSessionId,
+        )
       : convertHistoryToOpenAI(messages, systemText, provider, model)
 
     // Build request body with per-provider quirks applied.
@@ -500,6 +525,11 @@ export class OpenAICompatLane implements Lane {
       cacheSessionId,
     )
 
+    // TAU_CACHE_DEBUG: fingerprint the prefix and report the first segment that
+    // diverged from the previous turn — the exact point the upstream cache goes
+    // cold. No-op unless the env var is set. See cache_debug.ts.
+    recordCompatCacheDebug(provider, model, cacheSessionId, body, querySource)
+
     // Ollama branch: skip the OpenAI-compat /v1 path entirely and use
     // the native /api/chat endpoint so we can set num_ctx + keep_alive.
     // The /v1 shim ignores those, so the model runs at its default 4096
@@ -524,6 +554,13 @@ export class OpenAICompatLane implements Lane {
     let reportedCachedInputTokens = 0
     let cacheWriteTokens = 0
     let reasoningTokens = 0
+
+    // Gemini explicit cache writes cover the SAME prefix bytes the request
+    // reads back (live-measured: advance turns report cached_tokens ===
+    // cache_write_tokens), unlike Anthropic where read and write buckets are
+    // disjoint slices of the prompt. Subtracting both from prompt_tokens
+    // would clamp fresh input to 0 on every advance turn.
+    const geminiOverlapCacheUsage = provider === 'openrouter' && isGeminiOnOpenRouter(model)
 
     const cacheReadTokens = () =>
       cacheWriteTokens > 0
@@ -672,6 +709,24 @@ export class OpenAICompatLane implements Lane {
           try {
             chunk = JSON.parse(payload)
           } catch { continue }
+
+          // OpenRouter chunks name the upstream provider that actually served
+          // this request — top-level `provider` on older responses, or under
+          // `openrouter_metadata` when the X-OpenRouter-Metadata header is on.
+          // Record it per session+model so the NEXT request can pin provider
+          // routing: OR's session_id stickiness is best-effort, and a silent
+          // re-route is a full upstream prompt-cache cold start.
+          if (provider === 'openrouter') {
+            const served =
+              typeof chunk.provider === 'string' && chunk.provider
+                ? chunk.provider
+                : typeof chunk.openrouter_metadata?.provider === 'string'
+                  ? chunk.openrouter_metadata.provider
+                  : undefined
+            if (served) {
+              recordOpenRouterServedProvider(cacheSessionId, model, served)
+            }
+          }
 
           // Apply per-provider response normalization (reasoning field
           // renames etc.) so downstream IR emission is uniform.
@@ -826,6 +881,8 @@ export class OpenAICompatLane implements Lane {
               } catch {
                 input = { _raw: buf.args }
               }
+              const repaired = repairCompatToolCall(implId, input)
+              input = repaired.input
               const anthropicToolUseId = buf.id.startsWith('toolu_') ? buf.id : `toolu_compat_${buf.id}`
               // Three-event sequence: start (empty input) + input_json_delta
               // (args as JSON string) + stop. claude.ts's accumulator reads
@@ -837,7 +894,7 @@ export class OpenAICompatLane implements Lane {
                 content_block: {
                   type: 'tool_use',
                   id: anthropicToolUseId,
-                  name: implId,
+                  name: repaired.toolName,
                   input: {},
                 },
               }
@@ -920,6 +977,8 @@ export class OpenAICompatLane implements Lane {
           } catch {
             input = { _raw: toolCall.function?.arguments ?? '' }
           }
+          const repaired = repairCompatToolCall(implId, input)
+          input = repaired.input
           const toolId = toolCall.id?.startsWith('toolu_') ? toolCall.id : `toolu_compat_${toolCall.id ?? `lmstudio_${currentBlockIndex}`}`
           yield {
             type: 'content_block_start',
@@ -927,7 +986,7 @@ export class OpenAICompatLane implements Lane {
             content_block: {
               type: 'tool_use',
               id: toolId,
-              name: implId,
+              name: repaired.toolName,
               input: {},
             },
           }
@@ -983,7 +1042,12 @@ export class OpenAICompatLane implements Lane {
         output_tokens: outputTokens,
         // OpenAI-style `prompt_tokens` is total (fresh + cached). Split
         // into fresh + cache_read to match Anthropic's additive buckets.
-        input_tokens: Math.max(0, inputTokens - cacheReadTokens() - cacheWriteTokens),
+        // Gemini-on-OpenRouter cache writes overlap the read bytes, so they
+        // are not subtracted a second time.
+        input_tokens: Math.max(
+          0,
+          inputTokens - cacheReadTokens() - (geminiOverlapCacheUsage ? 0 : cacheWriteTokens),
+        ),
         ...(cacheReadTokens() > 0 && { cache_read_input_tokens: cacheReadTokens() }),
         ...(cacheWriteTokens > 0 && { cache_creation_input_tokens: cacheWriteTokens }),
       },
@@ -1015,8 +1079,10 @@ export class OpenAICompatLane implements Lane {
     // union of every compat provider's catalog).
     const now = Date.now()
     const cacheKey = providerFilter ?? '__all__'
+    const liveOnlyCatalog =
+      providerFilter === 'moonshot' || providerFilter === 'minimax'
     const cached = _modelsCacheByProvider.get(cacheKey)
-    if (cached && now - cached.at < MODELS_CACHE_TTL_MS) {
+    if (!liveOnlyCatalog && cached && now - cached.at < MODELS_CACHE_TTL_MS) {
       return cached.models
     }
     const entries = Array.from(this.configs.entries())
@@ -1083,7 +1149,7 @@ export class OpenAICompatLane implements Lane {
       providerFilter === 'lmstudio'
       && out.length > 0
       && out.some(model => typeof model.contextWindow !== 'number' || model.contextWindow <= 0)
-    if (!hasIncompleteLmStudioContext) {
+    if (!liveOnlyCatalog && !hasIncompleteLmStudioContext) {
       _modelsCacheByProvider.set(cacheKey, { models: out, at: now })
     }
     return out
@@ -2048,7 +2114,7 @@ function applyProviderRequestQuirks(
     // cold write, the system breakpoint anchors a deep read and the two
     // rolling user breakpoints extend it to the latest tool result, so
     // subsequent turns hit ~100% of the prefix.
-    applyLastOnlyCacheBreakpoints(body.messages)
+    applyLastOnlyCacheBreakpoints(body.messages, body.model)
   }
 
   // Let the transformer apply its provider-specific quirks. Every
@@ -2144,7 +2210,7 @@ function stripCacheControlFromMessage(m: OpenAIChatMessage): OpenAIChatMessage {
  * Idempotent: existing markers are left untouched, so a SystemBlock that
  * arrived with cache_control already set isn't re-stamped.
  */
-function applyLastOnlyCacheBreakpoints(messages: OpenAIChatMessage[]): void {
+function applyLastOnlyCacheBreakpoints(messages: OpenAIChatMessage[], model = ''): void {
   const stampLast = (parts: Array<{ type: string; text?: string; cache_control?: { type: string } }>): void => {
     if (parts.length === 0) return
     const last = parts[parts.length - 1]
@@ -2162,6 +2228,16 @@ function applyLastOnlyCacheBreakpoints(messages: OpenAIChatMessage[]): void {
     } else if (Array.isArray(m.content) && m.content.length > 0) {
       stampLast(m.content as any)
     }
+  }
+
+  if (isGeminiOnOpenRouter(model)) {
+    // Gemini explicit caching uses only the LAST breakpoint, creates the
+    // cache synchronously, and treats it as both floor and ceiling for
+    // reads — so Gemini gets a single quantized anchor instead of the
+    // rolling trailing stamps (which move every turn and re-write a cache
+    // that is never re-used). See or_gemini_cache.ts for the measurements.
+    applyGeminiOpenRouterCacheAnchor(messages)
+    return
   }
 
   // 1. System breakpoint — anchors the whole system-prompt-plus-tools prefix.
@@ -2229,6 +2305,84 @@ function injectMagistralThinkingPrompt(messages: OpenAIChatMessage[]): OpenAICha
 function safeParseObject(s: string): Record<string, unknown> {
   if (!s) return {}
   try { return JSON.parse(s) as Record<string, unknown> } catch { return {} }
+}
+
+export interface RepairedCompatToolCall {
+  toolName: string
+  input: Record<string, unknown>
+}
+
+export function repairCompatToolCall(
+  toolName: string,
+  input: Record<string, unknown>,
+): RepairedCompatToolCall {
+  if (toolName === AFT_AST_SEARCH_TOOL_NAME) {
+    return repairAftAstSearchCall(input)
+  }
+  if (toolName === AFT_ZOOM_TOOL_NAME) {
+    return { toolName, input: repairAftZoomInput(input) }
+  }
+  if (toolName === AFT_DIAGNOSTICS_TOOL_NAME) {
+    return { toolName, input: repairAftDiagnosticsInput(input) }
+  }
+  return { toolName, input }
+}
+
+function repairAftAstSearchCall(input: Record<string, unknown>): RepairedCompatToolCall {
+  if (hasMeaningfulToolValue(input.pattern)) {
+    return { toolName: AFT_AST_SEARCH_TOOL_NAME, input }
+  }
+
+  const paths = Array.isArray(input.paths)
+    ? input.paths.filter((path): path is string => typeof path === 'string' && path.trim().length > 0)
+    : []
+  const target = paths.length === 0
+    ? '.'
+    : paths.length === 1
+      ? paths[0]
+      : paths
+
+  return {
+    toolName: AFT_OUTLINE_TOOL_NAME,
+    input: { target },
+  }
+}
+
+function repairAftZoomInput(input: Record<string, unknown>): Record<string, unknown> {
+  if (!hasMeaningfulToolValue(input.targets)) return input
+  if (!hasMeaningfulToolValue(input.filePath) && !hasMeaningfulToolValue(input.symbols)) return input
+
+  const out = { ...input }
+  if (targetsContainFilePath(input.targets)) {
+    delete out.filePath
+    delete out.symbols
+  } else {
+    delete out.targets
+  }
+  return out
+}
+
+function repairAftDiagnosticsInput(input: Record<string, unknown>): Record<string, unknown> {
+  if (!hasMeaningfulToolValue(input.filePath) || !hasMeaningfulToolValue(input.directory)) return input
+  const out = { ...input }
+  delete out.directory
+  return out
+}
+
+function hasMeaningfulToolValue(value: unknown): boolean {
+  if (value === undefined || value === null) return false
+  if (Array.isArray(value)) return value.length > 0
+  if (typeof value === 'string') return value.trim().length > 0
+  return true
+}
+
+function targetsContainFilePath(value: unknown): boolean {
+  const targets = Array.isArray(value) ? value : [value]
+  return targets.some(target => isToolRecord(target) && hasMeaningfulToolValue(target.filePath))
+}
+
+function isToolRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 function toOllamaMessage(m: OpenAIChatMessage): Record<string, unknown> {
@@ -2444,11 +2598,13 @@ async function* streamOllamaNative(
             let input: Record<string, unknown>
             try { input = buf.args ? JSON.parse(buf.args) : {} }
             catch { input = { _raw: buf.args } }
+            const repaired = repairCompatToolCall(implId, input)
+            input = repaired.input
             const anthropicToolUseId = buf.id.startsWith('toolu_') ? buf.id : `toolu_ollama_${buf.id}`
             yield {
               type: 'content_block_start',
               index: buf.anthropicIndex,
-              content_block: { type: 'tool_use', id: anthropicToolUseId, name: implId, input: {} },
+              content_block: { type: 'tool_use', id: anthropicToolUseId, name: repaired.toolName, input: {} },
             }
             yield {
               type: 'content_block_delta',
@@ -2652,10 +2808,21 @@ function convertHistoryToOpenAIForOpenRouter(
   messages: ProviderMessage[],
   systemText: string,
   model: string,
+  cacheSessionId?: string,
 ): OpenAIChatMessage[] {
   const { stable, volatile } = splitOpenRouterSystemForCache(systemText)
   const out = convertHistoryToOpenAI(messages, stable, 'openrouter', model)
-  if (volatile) insertOpenRouterVolatileContext(out, volatile)
+  // Freeze the volatile block to its first non-empty value for the session.
+  // OpenRouter's upstreams cache on the exact prompt prefix (DeepSeek
+  // automatic caching, Gemini implicit, Anthropic breakpoints all anchor on
+  // it), so the block must replay byte-identically every turn — fresh git
+  // status or a late MCP connect must NOT rewrite an already-cached message.
+  // Fresh state still reaches the model through the conversation tail.
+  const frozen = freezeSessionVolatileText(
+    volatileFreezeKey('openrouter', model, cacheSessionId, messages),
+    volatile,
+  )
+  if (frozen) insertOpenRouterVolatileContext(out, frozen)
   return out
 }
 
@@ -2796,12 +2963,15 @@ function insertOpenRouterVolatileContext(
     [OPENROUTER_VOLATILE_CONTEXT]: true,
   }
 
-  const last = messages[messages.length - 1]
-  if (last?.role === 'user') {
-    messages.splice(messages.length - 1, 0, contextMessage)
-  } else {
-    messages.push(contextMessage)
-  }
+  // FIXED leading position: right after the system message, ahead of the
+  // whole conversation. The block is session-frozen (see caller), so pinned
+  // here it becomes part of the byte-stable cached prefix. The previous
+  // placement — spliced in before the LAST user message — moved one slot
+  // later every turn, so the prefix diverged at the block's old position and
+  // every upstream re-billed the volatile block plus the latest exchange on
+  // every single call (on turn 2 the hit shrank to just the system message).
+  const insertAt = messages[0]?.role === 'system' ? 1 : 0
+  messages.splice(insertAt, 0, contextMessage)
 }
 
 function convertHistoryToOpenAIForDeepSeek(

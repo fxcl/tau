@@ -4,6 +4,7 @@ import { buildTool, type ToolDef } from '../../Tool.js'
 import { stopTask } from '../../tasks/stopTask.js'
 import { lazySchema } from '../../utils/lazySchema.js'
 import { jsonStringify } from '../../utils/slowOperations.js'
+import { TASK_OUTPUT_TOOL_NAME } from '../TaskOutputTool/constants.js'
 import { DESCRIPTION, TASK_STOP_TOOL_NAME } from './prompt.js'
 import { renderToolResultMessage, renderToolUseMessage } from './UI.js'
 
@@ -79,14 +80,9 @@ export const TaskStopTool = buildTool({
       }
     }
 
-    if (task.status !== 'running') {
-      return {
-        result: false,
-        message: `Task ${id} is not running (status: ${task.status})`,
-        errorCode: 3,
-      }
-    }
-
+    // A task that already finished is NOT an error: the end state the model
+    // wants ("task not running") already holds. call() answers gracefully —
+    // erroring here just sent models into stop→error→retry loops.
     return { result: true }
   },
   async description() {
@@ -112,6 +108,19 @@ export const TaskStopTool = buildTool({
     const id = task_id ?? shell_id
     if (!id) {
       throw new Error('Missing required parameter: task_id')
+    }
+
+    // Already-finished task: report the (already reached) end state as
+    // success instead of erroring. stopTask would throw 'not_running'.
+    const existing = getAppState().tasks?.[id] as TaskStateBase | undefined
+    if (existing && existing.status !== 'running') {
+      return {
+        data: {
+          message: `Task ${id} is already finished (status: ${existing.status}); nothing to stop. Use ${TASK_OUTPUT_TOOL_NAME} to read its output.`,
+          task_id: id,
+          task_type: existing.type ?? 'unknown',
+        },
+      }
     }
 
     const result = await stopTask(id, {

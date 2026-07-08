@@ -19,7 +19,7 @@ import {
   waitForInitialization,
 } from '../../services/lsp/manager.js'
 import type { ValidationResult } from '../../Tool.js'
-import { buildTool, type ToolDef } from '../../Tool.js'
+import { buildTool, toolMatchesName, type ToolDef, type Tools } from '../../Tool.js'
 import { uniq } from '../../utils/array.js'
 import { getCwd } from '../../utils/cwd.js'
 import { logForDebugging } from '../../utils/debug.js'
@@ -69,6 +69,37 @@ import {
   renderToolUseMessage,
   userFacingName,
 } from './UI.js'
+import {
+  AFT_AST_SEARCH_TOOL_NAME,
+  AFT_DIAGNOSTICS_TOOL_NAME,
+  AFT_NAVIGATE_TOOL_NAME,
+  AFT_OUTLINE_TOOL_NAME,
+  AFT_ZOOM_TOOL_NAME,
+} from '../AFTTool/constants.js'
+
+const AFT_TOOL_NAMES = [
+  AFT_OUTLINE_TOOL_NAME,
+  AFT_ZOOM_TOOL_NAME,
+  AFT_AST_SEARCH_TOOL_NAME,
+  AFT_NAVIGATE_TOOL_NAME,
+  AFT_DIAGNOSTICS_TOOL_NAME,
+]
+
+function hasAftTool(tools: Tools): boolean {
+  return tools.some(tool =>
+    AFT_TOOL_NAMES.some(name => toolMatchesName(tool, name)),
+  )
+}
+
+function lspDescription(tools: Tools): string {
+  return hasAftTool(tools)
+    ? DESCRIPTION
+    : DESCRIPTION.replace('fall back to AFT or Grep', 'fall back to Grep')
+}
+
+function unsupportedFallbackText(tools: Tools): string {
+  return hasAftTool(tools) ? 'AFT or Grep' : 'Grep'
+}
 
 const MAX_LSP_FILE_SIZE_BYTES = 10_000_000
 
@@ -261,13 +292,13 @@ export const LSPTool = buildTool({
       appState.toolPermissionContext,
     )
   },
-  async prompt() {
-    return DESCRIPTION
+  async prompt(options) {
+    return lspDescription(options.tools)
   },
   renderToolUseMessage,
   renderToolUseErrorMessage,
   renderToolResultMessage,
-  async call(input: Input, _context) {
+  async call(input: Input, context) {
     let absolutePath = expandPath(input.filePath)
     const cwd = getCwd()
 
@@ -328,9 +359,7 @@ export const LSPTool = buildTool({
     // coordinates) or explicit 1-based line/character.
     let position1Based: { line: number; character: number } | undefined
     if (LSP_POSITION_OPERATIONS.has(input.operation)) {
-      if (typeof input.line === 'number' && typeof input.character === 'number') {
-        position1Based = { line: input.line, character: input.character }
-      } else if (input.symbol) {
+      if (input.symbol) {
         const resolved = await resolveSymbolPosition(absolutePath, input.symbol)
         if (!resolved) {
           const output: Output = {
@@ -341,6 +370,8 @@ export const LSPTool = buildTool({
           return { data: output }
         }
         position1Based = resolved
+      } else if (typeof input.line === 'number' && typeof input.character === 'number') {
+        position1Based = { line: input.line, character: input.character }
       } else {
         const output: Output = {
           operation: input.operation,
@@ -424,7 +455,7 @@ export const LSPTool = buildTool({
           } else {
             const output: Output = {
               operation: input.operation,
-              result: `The language server for this file does not support ${input.operation}. Use AFT or Grep for this instead.`,
+              result: `The language server for this file does not support ${input.operation}. Use ${unsupportedFallbackText(context.options.tools)} for this instead.`,
               filePath: input.filePath,
             }
             return { data: output }
@@ -559,13 +590,13 @@ export const LSPTool = buildTool({
 
       // Some servers don't implement every capability (e.g. the JSON server
       // has no workspace/symbol). Surface that as a calm "not supported" hint
-      // instead of a scary error so the model cleanly falls back to AFT/Grep.
+      // instead of a scary error so the model cleanly falls back.
       const unsupported =
         /unhandled method|method not found|not supported|cannot read|unimplemented/i.test(
           errorMessage,
         )
       const result = unsupported
-        ? `The language server for this file does not support ${input.operation}. Use a different LSP operation, or fall back to AFT or Grep.`
+        ? `The language server for this file does not support ${input.operation}. Use a different LSP operation, or fall back to ${unsupportedFallbackText(context.options.tools)}.`
         : `Error performing ${input.operation}: ${errorMessage}`
 
       const output: Output = {

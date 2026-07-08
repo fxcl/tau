@@ -14,8 +14,16 @@ import { clineLane } from './loop.js'
 import { loadProviderKey } from '../../services/api/auth/api_key_manager.js'
 
 function readStoredClineOAuthToken(): string | undefined {
+  return readStoredOAuthToken('cline_oauth')
+}
+
+function readStoredClinePassOAuthToken(): string | undefined {
+  return readStoredOAuthToken('clinepass_oauth')
+}
+
+function readStoredOAuthToken(storageKey: string): string | undefined {
   try {
-    const raw = loadProviderKey('cline_oauth')
+    const raw = loadProviderKey(storageKey)
     if (!raw) return undefined
     const parsed = JSON.parse(raw) as { accessToken?: string }
     return parsed.accessToken
@@ -27,6 +35,7 @@ function readStoredClineOAuthToken(): string | undefined {
 export function initClineLane(): void {
   clineLane.configure({
     oauthToken: readStoredClineOAuthToken(),
+    clinePassOAuthToken: readStoredClinePassOAuthToken(),
   })
   registerLane(clineLane)
 }

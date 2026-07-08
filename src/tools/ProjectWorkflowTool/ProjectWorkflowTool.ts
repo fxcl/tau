@@ -66,6 +66,10 @@ type OutputSchema = ReturnType<typeof outputSchema>
 export type Output = z.infer<OutputSchema>
 type Command = z.infer<typeof commandSchema>
 type Manifest = z.infer<typeof manifestSchema>
+export type DetectProjectWorkflowInput = {
+  path?: string
+  maxDepth?: number
+}
 
 function safeStat(path: string) {
   try {
@@ -274,6 +278,34 @@ function previewDir(path: string): string {
   }
 }
 
+export function detectProjectWorkflow(
+  input: DetectProjectWorkflowInput = {},
+): Output {
+  const start = resolveStartPath(input.path)
+  const maxDepth = input.maxDepth ?? 2
+  const dirs = candidateDirs(start, maxDepth)
+  const manifests = dirs.flatMap(inspectDir)
+  const warnings: string[] = []
+
+  if (!existsSync(start)) {
+    warnings.push(`Path does not exist: ${start}`)
+  } else if (manifests.length === 0) {
+    const preview = previewDir(start)
+    warnings.push(
+      preview
+        ? `No supported manifests found near ${start}. Directory entries: ${preview}`
+        : `No supported manifests found near ${start}.`,
+    )
+  }
+
+  return {
+    root: start,
+    manifests,
+    recommendations: buildRecommendations(manifests),
+    warnings,
+  }
+}
+
 export const ProjectWorkflowTool = buildTool({
   name: PROJECT_WORKFLOW_TOOL_NAME,
   searchHint: 'detect project scripts commands',
@@ -329,31 +361,7 @@ export const ProjectWorkflowTool = buildTool({
     )
   },
   async call(input) {
-    const start = resolveStartPath(input.path)
-    const maxDepth = input.maxDepth ?? 2
-    const dirs = candidateDirs(start, maxDepth)
-    const manifests = dirs.flatMap(inspectDir)
-    const warnings: string[] = []
-
-    if (!existsSync(start)) {
-      warnings.push(`Path does not exist: ${start}`)
-    } else if (manifests.length === 0) {
-      const preview = previewDir(start)
-      warnings.push(
-        preview
-          ? `No supported manifests found near ${start}. Directory entries: ${preview}`
-          : `No supported manifests found near ${start}.`,
-      )
-    }
-
-    return {
-      data: {
-        root: start,
-        manifests,
-        recommendations: buildRecommendations(manifests),
-        warnings,
-      },
-    }
+    return { data: detectProjectWorkflow(input) }
   },
   mapToolResultToToolResultBlockParam(output, toolUseID) {
     const lines = [

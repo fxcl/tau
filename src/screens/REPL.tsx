@@ -161,6 +161,7 @@ import { getQuerySourceForREPL } from '../utils/promptCategory.js';
 import { shortRequestId } from '../services/mcp/channelPermissions.js';
 import { useMergedTools } from '../hooks/useMergedTools.js';
 import { mergeAndFilterTools } from '../utils/toolPool.js';
+import { getPowerModeFromSettings } from '../utils/powerMode.js';
 import { useMergedCommands } from '../hooks/useMergedCommands.js';
 import { useSkillsChange } from '../hooks/useSkillsChange.js';
 import { useManagePlugins } from '../hooks/useManagePlugins.js';
@@ -181,6 +182,7 @@ import { resolveAgentTools } from '../tools/AgentTool/agentToolUtils.js';
 import { resumeAgentBackground } from '../tools/AgentTool/resumeAgent.js';
 import { useMainLoopModel } from '../hooks/useMainLoopModel.js';
 import { getAPIProvider } from '../utils/model/providers.js';
+import { selectFreshOpenAIGptModelForProvider } from '../utils/model/openaiGptModels.js';
 import { useAppState, useSetAppState, useAppStateStore, type AppState } from '../state/AppState.js';
 import type { ContentBlockParam, ImageBlockParam } from '@anthropic-ai/sdk/resources/messages.mjs';
 import type { ProcessUserInputContext } from '../utils/processUserInput/processUserInput.js';
@@ -268,6 +270,7 @@ import { PluginHintMenu } from 'src/components/ClaudeCodeHint/PluginHintMenu.js'
 import { DesktopUpsellStartup, shouldShowDesktopUpsellStartup } from 'src/components/DesktopUpsell/DesktopUpsellStartup.js';
 import { usePluginInstallationStatus } from 'src/hooks/notifs/usePluginInstallationStatus.js';
 import { usePluginAutoupdateNotification } from 'src/hooks/notifs/usePluginAutoupdateNotification.js';
+import { useNpmUpdateNotification } from 'src/hooks/notifs/useNpmUpdateNotification.js';
 import { performStartupChecks } from 'src/utils/plugins/performStartupChecks.js';
 import { UserTextMessage } from 'src/components/messages/UserTextMessage.js';
 import { AwsAuthStatusBox } from '../components/AwsAuthStatusBox.js';
@@ -317,15 +320,15 @@ const HISTORY_STUB = {
 // https://anthropic.slack.com/archives/C07VBSHV7EV/p1773545449871739
 const RECENT_SCROLL_REPIN_WINDOW_MS = 3000;
 
-function looksLikeConcreteOpenAIModelId(value: unknown): value is string {
-  return typeof value === 'string' && value.toLowerCase().startsWith('gpt-');
-}
-
-function getFreshOpenAIMainLoopModel(fallback: string, state: AppState, renderedMainLoopModel?: string): string {
-  if (getAPIProvider() !== 'openai') return fallback;
-  if (renderedMainLoopModel !== undefined && fallback !== renderedMainLoopModel) return fallback;
+function getFreshOpenAIGptMainLoopModel(fallback: string, state: AppState, renderedMainLoopModel?: string): string {
+  const provider = getAPIProvider();
   const selected = state.mainLoopModelForSession ?? state.mainLoopModel;
-  return looksLikeConcreteOpenAIModelId(selected) ? selected : fallback;
+  return selectFreshOpenAIGptModelForProvider({
+    fallback,
+    selected,
+    provider,
+    renderedMainLoopModel
+  });
 }
 
 // Use LRU cache to prevent unbounded memory growth
@@ -743,7 +746,14 @@ export function REPL({
   // /brief mid-session leaves the stale tool list (no SendUserMessage) and
   // the model emits plain text the brief filter hides.
   const isBriefOnly = useAppState(s => s.isBriefOnly);
-  const localTools = useMemo(() => getTools(toolPermissionContext), [toolPermissionContext, proactiveActive, isBriefOnly]);
+  // Key on power mode + saved toggles, not saved toggles alone: /mode
+  // cheap/full forces the effective toggle state (and the cheap core
+  // allowlist inside getTools) without rewriting disabledPrebuiltTools, so a
+  // mode switch must recompute the pool even though the saved list is
+  // untouched. Without the mode in the key, a normal-mode toggle stayed
+  // baked into the live tool list after switching to full/cheap.
+  const disabledPrebuiltToolsKey = useAppState(s => `${getPowerModeFromSettings(s.settings)}\0${(s.settings.disabledPrebuiltTools ?? []).join('\0')}`);
+  const localTools = useMemo(() => getTools(toolPermissionContext), [toolPermissionContext, proactiveActive, isBriefOnly, disabledPrebuiltToolsKey]);
   useKickOffCheckAndDisableBypassPermissionsIfNeeded();
   useKickOffCheckAndDisableAutoModeIfNeeded();
   const [dynamicMcpConfig, setDynamicMcpConfig] = useState<Record<string, ScopedMcpServerConfig> | undefined>(initialDynamicMcpConfig);
@@ -805,6 +815,7 @@ export function REPL({
   useAutoModeUnavailableNotification();
   usePluginInstallationStatus();
   usePluginAutoupdateNotification();
+  useNpmUpdateNotification();
   useSettingsErrors();
   useRateLimitWarningNotification(mainLoopModel);
   useFastModeNotification();
@@ -2523,11 +2534,11 @@ export function REPL({
     const computeTools = () => {
       const state = store.getState();
       const assembled = assembleToolPool(state.toolPermissionContext, state.mcp.tools);
-      const merged = mergeAndFilterTools(combinedInitialTools, assembled, state.toolPermissionContext.mode);
+      const merged = mergeAndFilterTools(combinedInitialTools, assembled, state.toolPermissionContext.mode, state.settings);
       if (!mainThreadAgentDefinition) return merged;
       return resolveAgentTools(mainThreadAgentDefinition, merged, false, true).resolvedTools;
     };
-    const effectiveMainLoopModel = getFreshOpenAIMainLoopModel(mainLoopModelParam, s, mainLoopModel);
+    const effectiveMainLoopModel = getFreshOpenAIGptMainLoopModel(mainLoopModelParam, s, mainLoopModel);
     return {
       abortController,
       options: {

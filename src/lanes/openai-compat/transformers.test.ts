@@ -27,6 +27,10 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { TRANSFORMERS, getTransformer } from './transformers/index.js'
+import {
+  _resetOpenRouterAutoPinForTest,
+  recordOpenRouterServedProvider,
+} from './transformers/openrouter.js'
 import type { Transformer, TransformContext } from './transformers/base.js'
 import type { OpenAIChatMessage, OpenAIChatRequest } from './transformers/shared_types.js'
 import { selectEditToolSet, OPENAI_COMPAT_TOOL_REGISTRY } from './tools.js'
@@ -869,7 +873,7 @@ function main(): void {
       )
     }
   })
-  test('openrouter stamps session id and enables context compression', () => {
+  test('openrouter stamps session id without enabling gateway compression by default', () => {
     const body = mkBody('anthropic/claude-sonnet-4-6')
     TRANSFORMERS.openrouter.transformRequest(body, {
       model: 'anthropic/claude-sonnet-4-6',
@@ -886,9 +890,110 @@ function main(): void {
     }) ?? {}
     assert(headers['x-session-id'] === sessionKey, `x-session-id=${headers['x-session-id']}`)
     assert(
-      body.plugins?.some(plugin => plugin.id === 'context-compression' && plugin.enabled !== false),
+      !body.plugins?.some(plugin => plugin.id === 'context-compression'),
       `plugins=${JSON.stringify(body.plugins)}`,
     )
+  })
+  test('openrouter pins provider order only when the env is set', () => {
+    const oldOrder = process.env.OPENROUTER_PROVIDER_ORDER
+    const oldFallbacks = process.env.OPENROUTER_ALLOW_FALLBACKS
+    delete process.env.OPENROUTER_PROVIDER_ORDER
+    delete process.env.OPENROUTER_ALLOW_FALLBACKS
+    try {
+      const ctx = {
+        model: 'deepseek/deepseek-v4-flash',
+        isReasoning: false,
+        reasoningEffort: null,
+        sessionId: 'session-fixed',
+      }
+      // Default: no provider preference emitted.
+      const plain = mkBody('deepseek/deepseek-v4-flash')
+      TRANSFORMERS.openrouter.transformRequest(plain, ctx)
+      assert((plain as any).provider === undefined,
+        `provider should be absent by default: ${JSON.stringify((plain as any).provider)}`)
+
+      // Env set: order + allow_fallbacks pass through.
+      process.env.OPENROUTER_PROVIDER_ORDER = 'deepseek, fireworks'
+      process.env.OPENROUTER_ALLOW_FALLBACKS = 'false'
+      const pinned = mkBody('deepseek/deepseek-v4-flash')
+      TRANSFORMERS.openrouter.transformRequest(pinned, ctx)
+      const provider = (pinned as any).provider
+      assert(JSON.stringify(provider?.order) === JSON.stringify(['deepseek', 'fireworks']),
+        `provider.order=${JSON.stringify(provider?.order)}`)
+      assert(provider?.allow_fallbacks === false,
+        `allow_fallbacks=${JSON.stringify(provider?.allow_fallbacks)}`)
+    } finally {
+      if (oldOrder === undefined) delete process.env.OPENROUTER_PROVIDER_ORDER
+      else process.env.OPENROUTER_PROVIDER_ORDER = oldOrder
+      if (oldFallbacks === undefined) delete process.env.OPENROUTER_ALLOW_FALLBACKS
+      else process.env.OPENROUTER_ALLOW_FALLBACKS = oldFallbacks
+    }
+  })
+  test('openrouter auto-pins the provider that served the session', () => {
+    const oldOrder = process.env.OPENROUTER_PROVIDER_ORDER
+    const oldAutoPin = process.env.TAU_OPENROUTER_AUTO_PIN
+    delete process.env.OPENROUTER_PROVIDER_ORDER
+    delete process.env.TAU_OPENROUTER_AUTO_PIN
+    try {
+      _resetOpenRouterAutoPinForTest()
+      const ctx = {
+        model: 'deepseek/deepseek-v4-flash',
+        isReasoning: false,
+        reasoningEffort: null,
+        sessionId: 'sess-pin',
+      }
+
+      // No provider observed yet → no pin.
+      const first = mkBody('deepseek/deepseek-v4-flash')
+      TRANSFORMERS.openrouter.transformRequest(first, ctx)
+      assert((first as any).provider === undefined,
+        `no pin expected before a served provider is recorded: ${JSON.stringify((first as any).provider)}`)
+
+      // Stream chunk reported the serving provider (display name) → next
+      // request pins its slug, fallbacks left available.
+      recordOpenRouterServedProvider('sess-pin', 'deepseek/deepseek-v4-flash', 'DeepSeek')
+      const second = mkBody('deepseek/deepseek-v4-flash')
+      TRANSFORMERS.openrouter.transformRequest(second, ctx)
+      const pin = (second as any).provider
+      assert(JSON.stringify(pin?.order) === JSON.stringify(['deepseek']),
+        `provider.order=${JSON.stringify(pin?.order)}`)
+      assert(pin?.allow_fallbacks === undefined,
+        `auto-pin must keep fallbacks available: ${JSON.stringify(pin)}`)
+
+      // Display names with spaces normalize to slugs.
+      recordOpenRouterServedProvider('sess-pin', 'deepseek/deepseek-v4-flash', 'Amazon Bedrock')
+      const third = mkBody('deepseek/deepseek-v4-flash')
+      TRANSFORMERS.openrouter.transformRequest(third, ctx)
+      assert(JSON.stringify((third as any).provider?.order) === JSON.stringify(['amazon-bedrock']),
+        `normalized order=${JSON.stringify((third as any).provider?.order)}`)
+
+      // Pin is per session+model — other sessions/models unaffected.
+      const otherSession = mkBody('deepseek/deepseek-v4-flash')
+      TRANSFORMERS.openrouter.transformRequest(otherSession, { ...ctx, sessionId: 'sess-other' })
+      assert((otherSession as any).provider === undefined,
+        `other session must not inherit the pin: ${JSON.stringify((otherSession as any).provider)}`)
+
+      // Kill switch.
+      process.env.TAU_OPENROUTER_AUTO_PIN = '0'
+      const disabled = mkBody('deepseek/deepseek-v4-flash')
+      TRANSFORMERS.openrouter.transformRequest(disabled, ctx)
+      assert((disabled as any).provider === undefined,
+        `TAU_OPENROUTER_AUTO_PIN=0 must disable the pin: ${JSON.stringify((disabled as any).provider)}`)
+      delete process.env.TAU_OPENROUTER_AUTO_PIN
+
+      // Explicit env order beats the auto-pin.
+      process.env.OPENROUTER_PROVIDER_ORDER = 'fireworks'
+      const explicit = mkBody('deepseek/deepseek-v4-flash')
+      TRANSFORMERS.openrouter.transformRequest(explicit, ctx)
+      assert(JSON.stringify((explicit as any).provider?.order) === JSON.stringify(['fireworks']),
+        `explicit env must win: ${JSON.stringify((explicit as any).provider?.order)}`)
+    } finally {
+      _resetOpenRouterAutoPinForTest()
+      if (oldOrder === undefined) delete process.env.OPENROUTER_PROVIDER_ORDER
+      else process.env.OPENROUTER_PROVIDER_ORDER = oldOrder
+      if (oldAutoPin === undefined) delete process.env.TAU_OPENROUTER_AUTO_PIN
+      else process.env.TAU_OPENROUTER_AUTO_PIN = oldAutoPin
+    }
   })
   test('openrouter keeps small-fast calls on the selected model', () => {
     for (const model of [
@@ -903,14 +1008,14 @@ function main(): void {
       )
     }
   })
-  test('openrouter can disable context compression by env', () => {
+  test('openrouter can enable context compression by env', () => {
     const oldValue = process.env.CLAUDEX_OPENROUTER_CONTEXT_COMPRESSION
-    process.env.CLAUDEX_OPENROUTER_CONTEXT_COMPRESSION = 'false'
+    process.env.CLAUDEX_OPENROUTER_CONTEXT_COMPRESSION = 'true'
     try {
       const body = mkBody('anthropic/claude-sonnet-4-6')
       TRANSFORMERS.openrouter.transformRequest(body, mkCtx('anthropic/claude-sonnet-4-6'))
       assert(
-        body.plugins?.some(plugin => plugin.id === 'context-compression' && plugin.enabled === false),
+        body.plugins?.some(plugin => plugin.id === 'context-compression' && plugin.enabled !== false),
         `plugins=${JSON.stringify(body.plugins)}`,
       )
     } finally {
@@ -1070,6 +1175,37 @@ function main(): void {
       `prompt_cache_retention=${body.prompt_cache_retention}`)
     assert(TRANSFORMERS.moonshot.cacheControlMode('kimi-k2.6') === 'none',
       'moonshot should not use cache_control markers')
+  })
+  test('moonshot catalog is live-only and keeps live /models metadata', () => {
+    assert(TRANSFORMERS.moonshot.preferLiveModelCatalog?.() === true,
+      'expected live /models to be preferred')
+    assert(TRANSFORMERS.moonshot.staticCatalog?.() === undefined,
+      'moonshot must not expose a hardcoded static catalog')
+    const filtered = TRANSFORMERS.moonshot.filterModelCatalog?.([
+      {
+        id: 'kimi-k2.7-code',
+        contextWindow: 262144,
+        tags: ['reasoning'],
+      } as any,
+      { id: 'whisper-large-v3' } as any,
+    ]) ?? []
+    assert(filtered.length === 1, `filtered=${JSON.stringify(filtered)}`)
+    assert(filtered[0]?.id === 'kimi-k2.7-code', 'expected live Kimi id kept')
+    assert(filtered[0]?.contextWindow === 262144, 'expected live context_length mapped')
+    assert(filtered[0]?.tags?.includes('reasoning'), 'expected live reasoning flag mapped')
+  })
+  test('minimax catalog is live-only and keeps live /models rows', () => {
+    assert(TRANSFORMERS.minimax.preferLiveModelCatalog?.() === true,
+      'expected live /models to be preferred')
+    assert(TRANSFORMERS.minimax.staticCatalog?.() === undefined,
+      'minimax must not expose a hardcoded static catalog')
+    const filtered = TRANSFORMERS.minimax.filterModelCatalog?.([
+      { id: 'MiniMax-M3', contextWindow: 1000000 } as any,
+      { id: 'MiniMax-Speech-2.8' } as any,
+    ]) ?? []
+    assert(filtered.length === 1, `filtered=${JSON.stringify(filtered)}`)
+    assert(filtered[0]?.id === 'MiniMax-M3', 'expected live MiniMax id kept')
+    assert(filtered[0]?.contextWindow === 1000000, 'expected live context_length mapped')
   })
   test('copilot sends stable session affinity headers', () => {
     const h = TRANSFORMERS.copilot.buildHeaders?.('copilot-token', {

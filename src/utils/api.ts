@@ -34,6 +34,7 @@ import { AGENT_TOOL_NAME } from '../tools/AgentTool/constants.js'
 import type { AgentDefinition } from '../tools/AgentTool/loadAgentsDir.js'
 import { EXIT_PLAN_MODE_V2_TOOL_NAME } from '../tools/ExitPlanModeTool/constants.js'
 import { TASK_OUTPUT_TOOL_NAME } from '../tools/TaskOutputTool/constants.js'
+import { isDeferredTool } from '../tools/ToolSearchTool/prompt.js'
 import type { Message } from '../types/message.js'
 import { isAgentSwarmsEnabled } from './agentSwarmsEnabled.js'
 import {
@@ -75,6 +76,16 @@ type BetaToolWithExtras = BetaTool & {
     ttl?: '5m' | '1h'
   }
   eager_input_streaming?: boolean
+  __tau_should_defer?: boolean
+}
+
+function markTauDeferredToolSchema<T extends object>(schema: T, tool: Tool): T {
+  Object.defineProperty(schema, '__tau_should_defer', {
+    value: isDeferredTool(tool),
+    enumerable: false,
+    configurable: true,
+  })
+  return schema
 }
 
 export type CacheScope = 'global' | 'org'
@@ -250,19 +261,19 @@ export async function toolToAPISchema(
     const stripped = Object.keys(schema).filter(k => !allowed.has(k))
     if (stripped.length > 0) {
       logStripOnce(stripped)
-      return {
+      return markTauDeferredToolSchema({
         name: schema.name,
         description: schema.description,
         input_schema: schema.input_schema,
         ...(schema.cache_control && { cache_control: schema.cache_control }),
-      }
+      }, tool)
     }
   }
 
   // Note: We cast to BetaTool but the extra fields are still present at runtime
   // and will be serialized in the API request, even though they're not in the SDK's
   // BetaTool type definition. This is intentional for beta features.
-  return schema as BetaTool
+  return markTauDeferredToolSchema(schema, tool) as BetaTool
 }
 
 let loggedStrip = false

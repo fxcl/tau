@@ -1,4 +1,5 @@
 import { feature } from 'bun:bundle'
+import { pathToFileURL } from 'url'
 import type {
   Base64ImageSource,
   ContentBlockParam,
@@ -1011,7 +1012,7 @@ export const connectToServer = memoize(
         return {
           roots: [
             {
-              uri: `file://${getOriginalCwd()}`,
+              uri: pathToFileURL(getOriginalCwd()).href,
             },
           ],
         }

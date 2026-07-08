@@ -1160,6 +1160,49 @@ function main(): void {
     )
   })
 
+  // Regression: a `<<` that is NOT a heredoc opener (bit-shift, or trailing
+  // content after a closed heredoc) used to send the heredoc-splitting rewrites
+  // into infinite mutual recursion — the transform saw `includes('<<')`, called
+  // transformOutsideHeredocBodies on a chunk that never shrank, and the pair
+  // ping-ponged until "Maximum call stack size exceeded". Now gated on a real
+  // opener via hasHeredocOpener, so these must return (not throw).
+  console.log('\nheredoc opener guard (no infinite recursion):')
+
+  test('bit-shift in arithmetic does not blow the stack', () => {
+    assertEqual(
+      applyBashDefensiveRewrites('echo $((1 << 2))', 'linux'),
+      'echo $((1 << 2))',
+      'arithmetic << must pass through untouched',
+    )
+  })
+
+  test('bare << followed by a non-identifier does not recurse', () => {
+    // `<< 2` matches no heredoc-delimiter shape, so it must be left as-is.
+    const out = applyBashDefensiveRewrites('echo a << 2', 'linux')
+    assert(typeof out === 'string', 'must return a string, not throw')
+  })
+
+  test('closed heredoc followed by a bit-shift command does not recurse', () => {
+    const input = "cat <<'EOF'\nbody\nEOF\necho $((1 << 2))"
+    const out = applyBashDefensiveRewrites(input, 'linux')
+    assert(out.includes('body'), 'heredoc body must be preserved')
+    assert(out.includes('1 << 2'), 'trailing arithmetic must be preserved')
+  })
+
+  test('herestring <<< is handled without throwing', () => {
+    const out = applyBashDefensiveRewrites('grep foo <<< "bar"', 'linux')
+    assert(typeof out === 'string', 'must return a string, not throw')
+  })
+
+  test('real heredoc bodies are still left untouched', () => {
+    const input = "python - <<'PY'\nx = 1 << 2\nprint(x)\nPY"
+    assertEqual(
+      applyBashDefensiveRewrites(input, 'linux'),
+      input,
+      'quoted heredoc body (incl. its own <<) must be preserved verbatim',
+    )
+  })
+
   console.log(`\n${passed} passed, ${failed} failed`)
   if (failed > 0) process.exit(1)
 }

@@ -3,8 +3,10 @@
  */
 
 import type { ToolResultBlockParam } from '@anthropic-ai/sdk/resources/index.mjs'
-import { mkdir, writeFile } from 'fs/promises'
-import { join } from 'path'
+import { createReadStream } from 'fs'
+import { mkdir, open, readdir, stat, writeFile } from 'fs/promises'
+import { isAbsolute, join, relative, resolve } from 'path'
+import { createInterface } from 'readline'
 import { getOriginalCwd, getSessionId } from '../bootstrap/state.js'
 import {
   BYTES_PER_TOKEN,
@@ -17,12 +19,18 @@ import { logEvent } from '../services/analytics/index.js'
 import { sanitizeToolNameForAnalytics } from '../services/analytics/metadata.js'
 import type { Message } from '../types/message.js'
 import { logForDebugging } from './debug.js'
+import { getCwd } from './cwd.js'
 import { getErrnoCode, toError } from './errors.js'
 import { formatFileSize } from './format.js'
 import { logError } from './log.js'
 import { getProjectDir } from './sessionStorage.js'
 import { jsonStringify } from './slowOperations.js'
+import {
+  getProjectTempDirForTauOutputPaths,
+  isAllowedTauManagedTaskOutputPath,
+} from './tauManagedOutputPaths.js'
 import { selectToolResultPreview } from './toolResultCompression.js'
+import { posixPathToWindowsPath } from './windowsPaths.js'
 
 // Subdirectory name for tool results within a session
 export const TOOL_RESULTS_SUBDIR = 'tool-results'
@@ -115,6 +123,367 @@ export const PREVIEW_SIZE_BYTES = 2000
 export function getToolResultPath(id: string, isJson: boolean): string {
   const ext = isJson ? 'json' : 'txt'
   return join(getToolResultsDir(), `${id}.${ext}`)
+}
+
+export type RetrievePersistedToolResultOptions = {
+  path?: string
+  toolUseId?: string
+  startByte?: number
+  maxBytes?: number
+  startLine?: number
+  lineCount?: number
+}
+
+export type RetrievedPersistedToolResult =
+  | {
+      ok: true
+      path: string
+      totalBytes: number
+      range: string
+      content: string
+      truncated: boolean
+    }
+  | {
+      ok: false
+      error: string
+    }
+
+type RetrievedPersistedToolResultRange = {
+  range: string
+  content: string
+  truncated: boolean
+}
+
+const DEFAULT_RETRIEVE_BYTES = 20_000
+const MAX_RETRIEVE_BYTES = 100_000
+const DEFAULT_RETRIEVE_LINES = 200
+const MAX_RETRIEVE_LINES = 2_000
+function isInsidePath(child: string, parent: string): boolean {
+  const rel = relative(parent, child)
+  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))
+}
+
+function pathParts(path: string): string[] {
+  return path.split(/[\\/]+/).filter(Boolean)
+}
+
+function hasPathSeparator(path: string): boolean {
+  return /[\\/]/.test(path)
+}
+
+function isAllowedToolResultPath(path: string): boolean {
+  const resolvedPath = resolve(path)
+  const currentToolResultsDir = resolve(getToolResultsDir())
+  if (isInsidePath(resolvedPath, currentToolResultsDir)) return true
+
+  const projectDir = resolve(getProjectDir(getOriginalCwd()))
+  return (
+    isInsidePath(resolvedPath, projectDir) &&
+    pathParts(resolvedPath).includes(TOOL_RESULTS_SUBDIR)
+  )
+}
+
+/**
+ * The whole project-local `.tau` directory is Tau-managed output space
+ * (artifacts, diff-artifacts, mermaid, specs, and files the session itself
+ * wrote there). Restricting retrieval to a hardcoded subdirectory list made
+ * models loop on "Path must point inside …" for files they had just created
+ * under `.tau`, so any path inside `.tau` of the current or original cwd is
+ * readable here.
+ */
+function isAllowedTauManagedOutputPath(path: string): boolean {
+  const resolvedPath = resolve(path)
+  const roots = new Set([resolve(getCwd()), resolve(getOriginalCwd())])
+  for (const root of roots) {
+    const tauDir = resolve(root, '.tau')
+    if (isInsidePath(resolvedPath, tauDir)) return true
+  }
+  return false
+}
+
+function isAllowedSavedTauOutputPath(path: string): boolean {
+  return (
+    isAllowedToolResultPath(path) ||
+    isAllowedTauManagedOutputPath(path) ||
+    isAllowedTauManagedTaskOutputPath(path, getOriginalCwd())
+  )
+}
+
+/**
+ * Git Bash / MSYS-style absolute paths (`/c/Users/…`, `/cygdrive/c/…`) come
+ * back from models verbatim for paths Tau printed in Windows form. `resolve()`
+ * would misroot them at `<cwd drive>:\c\…`, so convert them first. Non-drive
+ * POSIX paths (e.g. `/tmp/x`) are left alone.
+ */
+function normalizeRetrievePathInput(path: string): string {
+  if (
+    process.platform === 'win32' &&
+    /^\/(?:[A-Za-z](?:\/|$)|cygdrive\/)/.test(path)
+  ) {
+    return posixPathToWindowsPath(path)
+  }
+  return path
+}
+
+function resolveSavedTauOutputPath(path: string): string {
+  const normalized = normalizeRetrievePathInput(path)
+  if (isAbsolute(normalized)) return resolve(normalized)
+  const parts = pathParts(normalized)
+  if (parts[0] === '.tau' || hasPathSeparator(normalized)) {
+    return resolve(getCwd(), normalized)
+  }
+  return resolve(getToolResultsDir(), normalized)
+}
+
+async function existingToolResultPath(
+  toolUseId: string,
+): Promise<string | null> {
+  const candidates = [
+    getToolResultPath(toolUseId, false),
+    getToolResultPath(toolUseId, true),
+  ]
+  for (const candidate of candidates) {
+    try {
+      const candidateStat = await stat(candidate)
+      if (candidateStat.isFile()) return candidate
+    } catch {
+      // Try the next extension.
+    }
+  }
+  return null
+}
+
+/**
+ * Models regularly hand a background TASK id to `toolUseId` — the two id
+ * formats look alike and both end up in "output saved to" messages. When no
+ * persisted tool result matches, look for `<session>/tasks/<id>.output` under
+ * this project's temp space (any session — cross-session reads within the
+ * project are already allowed by isAllowedTauManagedTaskOutputPath). Most
+ * recently modified wins if several sessions have the same task id.
+ */
+async function existingTaskOutputPathForId(id: string): Promise<string | null> {
+  if (hasPathSeparator(id) || id.includes('..')) return null
+  const projectTempDir = getProjectTempDirForTauOutputPaths(getOriginalCwd())
+  let sessionDirs: string[]
+  try {
+    sessionDirs = await readdir(projectTempDir)
+  } catch {
+    return null
+  }
+  let best: { path: string; mtimeMs: number } | null = null
+  for (const sessionDir of sessionDirs) {
+    const candidate = join(projectTempDir, sessionDir, 'tasks', `${id}.output`)
+    try {
+      const candidateStat = await stat(candidate)
+      if (
+        candidateStat.isFile() &&
+        (!best || candidateStat.mtimeMs > best.mtimeMs)
+      ) {
+        best = { path: candidate, mtimeMs: candidateStat.mtimeMs }
+      }
+    } catch {
+      // Not in this session — try the next.
+    }
+  }
+  return best?.path ?? null
+}
+
+type ResolvedSavedOutputPath =
+  | { ok: true; path: string }
+  | { ok: false; error: string }
+
+const PATH_NOT_ALLOWED_ERROR =
+  'Path must point inside a Tau tool-results directory, a project-local .tau directory, or a Tau-managed task output file. ' +
+  'For ordinary project files, use the Read tool instead.'
+
+async function resolveByPath(rawPath: string): Promise<ResolvedSavedOutputPath> {
+  const resolvedPath = resolveSavedTauOutputPath(rawPath.trim())
+  if (!isAllowedSavedTauOutputPath(resolvedPath)) {
+    return { ok: false, error: PATH_NOT_ALLOWED_ERROR }
+  }
+  return { ok: true, path: resolvedPath }
+}
+
+async function resolveByToolUseId(
+  rawToolUseId: string,
+): Promise<ResolvedSavedOutputPath> {
+  const toolUseId = rawToolUseId.trim()
+  if (hasPathSeparator(toolUseId)) {
+    return { ok: false, error: 'toolUseId must not contain path separators.' }
+  }
+  const path =
+    (await existingToolResultPath(toolUseId)) ??
+    (await existingTaskOutputPathForId(toolUseId))
+  if (!path) {
+    return {
+      ok: false,
+      error: `No persisted tool result or task output found for toolUseId: ${toolUseId}`,
+    }
+  }
+  return { ok: true, path }
+}
+
+async function isExistingFile(path: string): Promise<boolean> {
+  try {
+    return (await stat(path)).isFile()
+  } catch {
+    return false
+  }
+}
+
+async function resolvePersistedToolResultPath(
+  options: RetrievePersistedToolResultOptions,
+): Promise<RetrievedPersistedToolResult | { ok: true; path: string }> {
+  const rawPath = options.path?.trim()
+  const rawToolUseId = options.toolUseId?.trim()
+
+  // Both provided: auto-pick instead of erroring (models often send a printed
+  // path plus a guessed id together). The explicit path wins when it resolves
+  // to a real file; otherwise the id is tried before giving up.
+  if (rawPath && rawToolUseId) {
+    const viaPath = await resolveByPath(rawPath)
+    if (viaPath.ok && (await isExistingFile(viaPath.path))) return viaPath
+    const viaId = await resolveByToolUseId(rawToolUseId)
+    if (viaId.ok) return viaId
+    // Path's verdict leads (it's the more specific input); mention the id
+    // fallback so the model knows both were tried.
+    if (viaPath.ok) return viaPath
+    return {
+      ok: false,
+      error: `${viaPath.error} (toolUseId fallback also failed: ${viaId.error})`,
+    }
+  }
+
+  if (rawPath) return resolveByPath(rawPath)
+  if (rawToolUseId) return resolveByToolUseId(rawToolUseId)
+
+  return { ok: false, error: 'Provide either path or toolUseId.' }
+}
+
+function clampPositiveInt(
+  value: number | undefined,
+  fallback: number,
+  max: number,
+): number {
+  if (value === undefined || !Number.isFinite(value)) return fallback
+  return Math.min(Math.max(Math.floor(value), 1), max)
+}
+
+async function readByteRange(
+  path: string,
+  totalBytes: number,
+  startByteInput: number | undefined,
+  maxBytesInput: number | undefined,
+): Promise<RetrievedPersistedToolResultRange> {
+  const startByte =
+    startByteInput === undefined || !Number.isFinite(startByteInput)
+      ? 0
+      : Math.min(Math.max(Math.floor(startByteInput), 0), totalBytes)
+  const maxBytes = clampPositiveInt(
+    maxBytesInput,
+    DEFAULT_RETRIEVE_BYTES,
+    MAX_RETRIEVE_BYTES,
+  )
+  const bytesToRead = Math.min(maxBytes, Math.max(totalBytes - startByte, 0))
+  const buffer = Buffer.alloc(bytesToRead)
+  const handle = await open(path, 'r')
+  try {
+    const { bytesRead } = await handle.read(
+      buffer,
+      0,
+      bytesToRead,
+      startByte,
+    )
+    const endByte = startByte + bytesRead
+    return {
+      range: `bytes ${startByte}-${Math.max(endByte - 1, startByte)} of ${totalBytes}`,
+      content: buffer.subarray(0, bytesRead).toString('utf8'),
+      truncated: endByte < totalBytes,
+    }
+  } finally {
+    await handle.close()
+  }
+}
+
+async function readLineRange(
+  path: string,
+  startLineInput: number | undefined,
+  lineCountInput: number | undefined,
+): Promise<RetrievedPersistedToolResultRange> {
+  const startLine = clampPositiveInt(startLineInput, 1, Number.MAX_SAFE_INTEGER)
+  const lineCount = clampPositiveInt(
+    lineCountInput,
+    DEFAULT_RETRIEVE_LINES,
+    MAX_RETRIEVE_LINES,
+  )
+  const lines: string[] = []
+  let currentLine = 0
+  let currentSize = 0
+  let truncated = false
+  const rl = createInterface({
+    input: createReadStream(path, { encoding: 'utf8' }),
+    crlfDelay: Infinity,
+  })
+
+  for await (const line of rl) {
+    currentLine++
+    if (currentLine < startLine) continue
+    if (lines.length >= lineCount) {
+      truncated = true
+      rl.close()
+      break
+    }
+    if (currentSize + line.length > MAX_RETRIEVE_BYTES) {
+      const remaining = Math.max(MAX_RETRIEVE_BYTES - currentSize, 0)
+      if (remaining > 0) lines.push(line.slice(0, remaining))
+      truncated = true
+      rl.close()
+      break
+    }
+    lines.push(line)
+    currentSize += line.length + 1
+  }
+
+  const endLine = lines.length > 0 ? startLine + lines.length - 1 : startLine
+  return {
+    range: `lines ${startLine}-${endLine}`,
+    content: lines.join('\n'),
+    truncated,
+  }
+}
+
+export async function retrievePersistedToolResult(
+  options: RetrievePersistedToolResultOptions,
+): Promise<RetrievedPersistedToolResult> {
+  const resolved = await resolvePersistedToolResultPath(options)
+  if (!resolved.ok) return resolved
+
+  let fileStat
+  try {
+    fileStat = await stat(resolved.path)
+  } catch {
+    return { ok: false, error: `Persisted tool result not found: ${resolved.path}` }
+  }
+  if (!fileStat.isFile()) {
+    return { ok: false, error: `Not a file: ${resolved.path}` }
+  }
+
+  const range =
+    options.startLine !== undefined || options.lineCount !== undefined
+      ? await readLineRange(resolved.path, options.startLine, options.lineCount)
+      : await readByteRange(
+          resolved.path,
+          fileStat.size,
+          options.startByte,
+          options.maxBytes,
+        )
+
+  return {
+    ok: true,
+    path: resolved.path,
+    totalBytes: fileStat.size,
+    ...range,
+  }
 }
 
 /**

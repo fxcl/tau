@@ -56,10 +56,12 @@ import {
 } from '../utils/markdownConfigLoader.js'
 import type { ModelName } from '../utils/model/model.js'
 import { resolveSkillFrontmatterModel } from '../utils/model/skillModel.js'
+import { getPowerModeFromSettings } from '../utils/powerMode.js'
 import { executeShellCommandsInPrompt } from '../utils/promptShellExecution.js'
 import type { SettingSource } from '../utils/settings/constants.js'
 import { isSettingSourceEnabled } from '../utils/settings/constants.js'
 import { getManagedFilePath } from '../utils/settings/managedPath.js'
+import { getInitialSettings } from '../utils/settings/settings.js'
 import { isRestrictedToPluginOnly } from '../utils/settings/pluginOnlyPolicy.js'
 import { HooksSchema, type HooksSettings } from '../utils/settings/types.js'
 import { createSignal } from '../utils/signal.js'
@@ -863,6 +865,10 @@ export async function discoverSkillDirsForPaths(
   filePaths: string[],
   cwd: string,
 ): Promise<string[]> {
+  // Cheap power mode ignores folder skills — skip the directory walks.
+  if (getPowerModeFromSettings(getInitialSettings()) === 'cheap') {
+    return []
+  }
   const fs = getFsImplementation()
   const resolvedCwd = cwd.endsWith(pathSep) ? cwd.slice(0, -1) : cwd
   const newDirs: string[] = []
@@ -922,6 +928,12 @@ export async function discoverSkillDirsForPaths(
  * @param dirs Array of skill directories to load from (should be sorted deepest first)
  */
 export async function addSkillDirectories(dirs: string[]): Promise<void> {
+  if (getPowerModeFromSettings(getInitialSettings()) === 'cheap') {
+    logForDebugging(
+      '[skills] Dynamic skill discovery skipped: cheap power mode',
+    )
+    return
+  }
   if (
     !isSettingSourceEnabled('projectSettings') ||
     isRestrictedToPluginOnly('skills')
@@ -1000,6 +1012,10 @@ export function activateConditionalSkillsForPaths(
   cwd: string,
 ): string[] {
   if (conditionalSkills.size === 0) {
+    return []
+  }
+  // Cheap power mode: conditional folder skills never activate.
+  if (getPowerModeFromSettings(getInitialSettings()) === 'cheap') {
     return []
   }
 

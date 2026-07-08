@@ -7,6 +7,7 @@ import {
   applyAntigravityPrefixPad,
   diagnoseAntigravityCacheBreak,
   freezeAntigravityVolatilePrefix,
+  guardAntigravityCommitWindow,
   paceAntigravityAgentRequest,
   recordAntigravityCacheRead,
   _getAntigravityPaceStateForTest,
@@ -246,6 +247,126 @@ async function main(): Promise<void> {
       assert(Date.now() - start < 25, 'agents must not be paced when the discipline is off')
     } finally {
       process.env.TAU_ANTIGRAVITY_MAX_CACHE = '1'
+    }
+  })
+
+  console.log('antigravity session-start commit-window guard:')
+
+  // Over the guard's cacheable-size gate (~90k chars ≈ 16.4k tokens).
+  const BIG_PROMPT_CHARS = 120_000
+
+  await test('guard holds the second over-minimum request by default', async () => {
+    delete process.env.TAU_ANTIGRAVITY_MAX_CACHE
+    try {
+      _resetAntigravityCacheStateForTest()
+      _setAntigravityCommitWindowForTest(60)
+      await guardAntigravityCommitWindow('main-session', undefined, BIG_PROMPT_CHARS)
+      const start = Date.now()
+      await guardAntigravityCommitWindow('main-session', undefined, BIG_PROMPT_CHARS)
+      const waited = Date.now() - start
+      assert(waited >= 40, `second request must wait, waited=${waited}ms`)
+    } finally {
+      process.env.TAU_ANTIGRAVITY_MAX_CACHE = '1'
+    }
+  })
+
+  await test('guard never holds sub-minimum prompts', async () => {
+    _resetAntigravityCacheStateForTest()
+    _setAntigravityCommitWindowForTest(60)
+    await guardAntigravityCommitWindow('main-session', undefined, 40_000)
+    const start = Date.now()
+    await guardAntigravityCommitWindow('main-session', undefined, 40_000)
+    assert(Date.now() - start < 25, 'sub-minimum prompts must never wait')
+  })
+
+  await test('guard latches off after the first qualifying hit', async () => {
+    _resetAntigravityCacheStateForTest()
+    _setAntigravityCommitWindowForTest(60)
+    await guardAntigravityCommitWindow('main-session', undefined, BIG_PROMPT_CHARS)
+    recordAntigravityCacheRead('main-session', 9000, 10_000) // 90% coverage
+    const start = Date.now()
+    await guardAntigravityCommitWindow('main-session', undefined, BIG_PROMPT_CHARS)
+    assert(Date.now() - start < 25, 'hit-latched session must not wait')
+  })
+
+  await test('guard caps at two held turns per session', async () => {
+    _resetAntigravityCacheStateForTest()
+    _setAntigravityCommitWindowForTest(40)
+    await guardAntigravityCommitWindow('main-session', undefined, BIG_PROMPT_CHARS)
+    await guardAntigravityCommitWindow('main-session', undefined, BIG_PROMPT_CHARS)
+    await guardAntigravityCommitWindow('main-session', undefined, BIG_PROMPT_CHARS)
+    const start = Date.now()
+    await guardAntigravityCommitWindow('main-session', undefined, BIG_PROMPT_CHARS)
+    assert(Date.now() - start < 25, 'guard must cap at two held turns')
+  })
+
+  await test('a mid-session full cold re-arms the guard for the next request', async () => {
+    _resetAntigravityCacheStateForTest()
+    _setAntigravityCommitWindowForTest(60)
+    await guardAntigravityCommitWindow('main-session', undefined, BIG_PROMPT_CHARS)
+    recordAntigravityCacheRead('main-session', 30_000, 36_000) // warm, latched off
+    await guardAntigravityCommitWindow('main-session', undefined, BIG_PROMPT_CHARS)
+    // Mid-session full cold on an over-minimum prompt (routing miss, TTL,
+    // whatever): its replacement write commits async — next request must
+    // wait it out instead of cascading a second full-price miss.
+    recordAntigravityCacheRead('main-session', 0, 37_000)
+    const start = Date.now()
+    await guardAntigravityCommitWindow('main-session', undefined, BIG_PROMPT_CHARS)
+    const waited = Date.now() - start
+    assert(waited >= 40, `request after a mid-session cold must wait, waited=${waited}ms`)
+    const state = _getAntigravityPaceStateForTest('main-session')
+    assert(state?.rearms === 1, `one re-arm expected, got ${state?.rearms}`)
+  })
+
+  await test('partial reads between quanta never re-arm the guard', async () => {
+    _resetAntigravityCacheStateForTest()
+    _setAntigravityCommitWindowForTest(60)
+    await guardAntigravityCommitWindow('main-session', undefined, BIG_PROMPT_CHARS)
+    recordAntigravityCacheRead('main-session', 30_000, 36_000) // warm, latched off
+    recordAntigravityCacheRead('main-session', 20_000, 40_000) // 50% quantum-lag partial
+    const start = Date.now()
+    await guardAntigravityCommitWindow('main-session', undefined, BIG_PROMPT_CHARS)
+    assert(Date.now() - start < 25, 'a partial read is not a cold — no hold')
+  })
+
+  await test('sub-minimum colds never re-arm the guard', async () => {
+    _resetAntigravityCacheStateForTest()
+    _setAntigravityCommitWindowForTest(60)
+    await guardAntigravityCommitWindow('main-session', undefined, BIG_PROMPT_CHARS)
+    recordAntigravityCacheRead('main-session', 30_000, 36_000) // warm, latched off
+    recordAntigravityCacheRead('main-session', 0, 10_000) // below 16,384 — uncommittable
+    const start = Date.now()
+    await guardAntigravityCommitWindow('main-session', undefined, BIG_PROMPT_CHARS)
+    assert(Date.now() - start < 25, 'sub-minimum cold must not re-arm')
+  })
+
+  await test('mid-session re-arms are bounded per session', async () => {
+    _resetAntigravityCacheStateForTest()
+    _setAntigravityCommitWindowForTest(60)
+    await guardAntigravityCommitWindow('main-session', undefined, BIG_PROMPT_CHARS)
+    for (let i = 0; i < 5; i++) {
+      recordAntigravityCacheRead('main-session', 30_000, 36_000) // hit
+      recordAntigravityCacheRead('main-session', 0, 37_000) // cold
+    }
+    const state = _getAntigravityPaceStateForTest('main-session')
+    assert(state?.rearms === 4, `re-arms must cap at 4, got ${state?.rearms}`)
+    assert(state?.hitSeen === true, 'past the cap the session stays latched off')
+    const start = Date.now()
+    await guardAntigravityCommitWindow('main-session', undefined, BIG_PROMPT_CHARS)
+    assert(Date.now() - start < 25, 'past the cap no more holds')
+  })
+
+  await test('guard respects TAU_ANTIGRAVITY_NO_PACING=1', async () => {
+    _resetAntigravityCacheStateForTest()
+    _setAntigravityCommitWindowForTest(60)
+    process.env.TAU_ANTIGRAVITY_NO_PACING = '1'
+    try {
+      await guardAntigravityCommitWindow('main-session', undefined, BIG_PROMPT_CHARS)
+      const start = Date.now()
+      await guardAntigravityCommitWindow('main-session', undefined, BIG_PROMPT_CHARS)
+      assert(Date.now() - start < 25, 'env off-switch must disable the guard')
+    } finally {
+      delete process.env.TAU_ANTIGRAVITY_NO_PACING
     }
   })
 

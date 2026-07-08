@@ -5,6 +5,7 @@
  */
 
 import { providerSupportsAnthropicToolSearch } from './model/providerCapabilities.js'
+import { extractDiscoveredToolNames } from './toolDiscoveryScan.js'
 
 let passed = 0
 let failed = 0
@@ -45,6 +46,33 @@ test('other native lanes also bypass Anthropic tool-search deferral', () => {
       `${provider} must receive full tool schemas directly`,
     )
   }
+})
+
+test('direct assistant tool_use marks deferred tool as discovered for retry', () => {
+  const discovered = extractDiscoveredToolNames([
+    {
+      type: 'assistant',
+      message: {
+        id: 'msg_1',
+        type: 'message',
+        role: 'assistant',
+        model: 'test-model',
+        stop_reason: 'tool_use',
+        stop_sequence: null,
+        usage: { input_tokens: 1, output_tokens: 1 },
+        content: [
+          {
+            type: 'tool_use',
+            id: 'toolu_1',
+            name: 'TaskUpdate',
+            input: { id: '1', status: 'completed' },
+          },
+        ],
+      },
+    } as any,
+  ])
+
+  assert(discovered.has('TaskUpdate'), 'TaskUpdate should be discovered')
 })
 
 console.log(`\n${passed} passed, ${failed} failed`)

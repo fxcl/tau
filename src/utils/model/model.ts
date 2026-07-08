@@ -42,9 +42,45 @@ export function getSmallFastModel(): ModelName {
   }
   const provider = getAPIProvider()
   if (isThirdPartyProvider(provider)) {
+    // Helper / side-query traffic (session titles, memory extraction,
+    // away-summary, …) builds its OWN prompt, so it can never share the main
+    // conversation's prefix cache — every helper call is fully uncached by
+    // nature. What matters is (a) never billing a surprise cross-family model
+    // (users saw `openai/gpt-5.4-mini` fire mid-session on a DeepSeek run) and
+    // (b) not paying frontier input prices for a title. So on OpenRouter:
+    // same-FAMILY cheap tier for closed frontier mains (same upstream
+    // provider, ~1/3 the input price), main model for already-cheap
+    // open-weights pools. OR_MODEL_HAIKU overrides everything.
+    if (provider === 'openrouter' && !process.env.OR_MODEL_HAIKU) {
+      const main = getMainLoopModel()
+      return openRouterFamilyHelperModel(main) ?? main
+    }
     return getProviderModelSet(provider).haiku
   }
   return getDefaultHaikuModel()
+}
+
+/**
+ * Cheap same-family helper for closed frontier models on OpenRouter. Returns
+ * null for open-weights pool models (deepseek/qwen/llama/…) — those are cheap
+ * enough that staying on the main model beats warming a second model.
+ */
+function openRouterFamilyHelperModel(mainModel: string): ModelName | null {
+  const m = mainModel.toLowerCase()
+  if (m.startsWith('anthropic/')) {
+    // Already the cheap tier? Keep it.
+    if (m.includes('haiku')) return null
+    return 'anthropic/claude-haiku-4.5'
+  }
+  if (m.startsWith('openai/')) {
+    if (m.includes('mini') || m.includes('nano')) return null
+    return 'openai/gpt-5.4-mini'
+  }
+  if (m.startsWith('google/')) {
+    if (m.includes('flash')) return null
+    return 'google/gemini-2.5-flash-lite'
+  }
+  return null
 }
 
 export function isNonCustomOpusModel(model: ModelName): boolean {

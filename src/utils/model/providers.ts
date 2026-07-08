@@ -7,13 +7,13 @@ export type APIProvider =
   | 'firstParty' | 'bedrock' | 'vertex' | 'foundry'
   | 'openai' | 'gemini' | 'antigravity'
   | 'openrouter' | 'agentrouter' | 'modelrouter' | 'vercel' | 'requesty' | 'opencode' | 'opencodego' | 'commandcode' | 'fireworks' | 'cloudflare' | 'groq' | 'mistral' | 'nim' | 'deepseek' | 'glm' | 'moonshot' | 'minimax' | 'ollama' | 'lmstudio'
-  | 'cline' | 'copilot' | 'cursor' | 'iflow' | 'kilocode' | 'kiro'
+  | 'cline' | 'clinepass' | 'copilot' | 'cursor' | 'iflow' | 'kilocode' | 'kiro'
 
 const VALID_PROVIDERS: readonly APIProvider[] = [
   'firstParty', 'bedrock', 'vertex', 'foundry',
   'openai', 'gemini', 'antigravity',
   'openrouter', 'agentrouter', 'modelrouter', 'vercel', 'requesty', 'opencode', 'opencodego', 'commandcode', 'fireworks', 'cloudflare', 'groq', 'mistral', 'nim', 'deepseek', 'glm', 'moonshot', 'minimax', 'ollama', 'lmstudio',
-  'cline', 'copilot', 'cursor', 'iflow', 'kilocode', 'kiro',
+  'cline', 'clinepass', 'copilot', 'cursor', 'iflow', 'kilocode', 'kiro',
 ]
 
 export function isAPIProvider(value: string): value is APIProvider {
@@ -69,6 +69,8 @@ function _resolveAPIProvider(): APIProvider {
   if (isEnvTruthy(process.env.CLAUDE_CODE_USE_MINIMAX))    return 'minimax'
   if (isEnvTruthy(process.env.CLAUDE_CODE_USE_OLLAMA))    return 'ollama'
   if (isEnvTruthy(process.env.CLAUDE_CODE_USE_LMSTUDIO))  return 'lmstudio'
+  if (isEnvTruthy(process.env.CLAUDE_CODE_USE_CLINE_PASS) || isEnvTruthy(process.env.CLAUDE_CODE_USE_CLINEPASS)) return 'clinepass'
+  if (isEnvTruthy(process.env.CLAUDE_CODE_USE_CLINE)) return 'cline'
 
   // 3. Auto-detect OpenCode Zen from known free-tier models if the user passes
   // them directly (e.g. `tau -m deepseek-v4-flash-free`) so they don't have to
@@ -171,6 +173,7 @@ export const PROVIDER_DISPLAY_NAMES: Record<APIProvider, string> = {
   ollama: 'Ollama',
   lmstudio: 'LM Studio',
   cline: 'Cline',
+  clinepass: 'Cline Pass',
   copilot: 'GitHub Copilot',
   cursor: 'Cursor',
   iflow: 'iFlow',
@@ -186,19 +189,19 @@ export const PROVIDER_DISPLAY_NAMES: Record<APIProvider, string> = {
 // all kept intact for compatibility.
 export const SELECTABLE_PROVIDERS: readonly APIProvider[] = [
   'firstParty', 'openai', 'commandcode', 'antigravity', 'openrouter', 'agentrouter', 'vercel', 'requesty', 'opencode', 'opencodego', 'fireworks', 'cloudflare', 'mistral', 'nim', 'deepseek', 'glm', 'moonshot', 'minimax', 'ollama', 'lmstudio',
-  'cline', 'copilot', 'kilocode', 'kiro',
+  'cline', 'clinepass', 'copilot', 'kilocode', 'kiro',
 ]
 
 /** Providers that use OpenAI-compatible chat completions API */
 export function isOpenAICompatibleProvider(p: APIProvider): boolean {
   return ['openai', 'openrouter', 'agentrouter', 'modelrouter', 'vercel', 'requesty', 'opencode', 'opencodego', 'fireworks', 'cloudflare', 'groq', 'mistral', 'nim', 'deepseek', 'glm', 'moonshot', 'minimax', 'ollama', 'lmstudio',
-          'cline', 'copilot', 'iflow', 'kilocode'].includes(p)
+          'cline', 'clinepass', 'copilot', 'iflow', 'kilocode'].includes(p)
 }
 
 /** All non-Anthropic third-party LLM providers */
 export function isThirdPartyProvider(p: APIProvider): boolean {
   return ['openai', 'gemini', 'antigravity', 'openrouter', 'agentrouter', 'modelrouter', 'vercel', 'requesty', 'opencode', 'opencodego', 'commandcode', 'fireworks', 'cloudflare', 'groq', 'mistral', 'nim', 'deepseek', 'glm', 'moonshot', 'minimax', 'ollama', 'lmstudio',
-          'cline', 'copilot', 'cursor', 'iflow', 'kilocode', 'kiro'].includes(p)
+          'cline', 'clinepass', 'copilot', 'cursor', 'iflow', 'kilocode', 'kiro'].includes(p)
 }
 
 /** Original Anthropic-native providers (firstParty + cloud partners) */

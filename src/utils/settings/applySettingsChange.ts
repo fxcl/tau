@@ -1,5 +1,8 @@
 import type { AppState } from '../../state/AppState.js'
+import { clearToolSchemaCache as clearAdapterToolSchemaCache } from '../../services/api/adapters/tool_schema_cache.js'
+import { clearToolSearchDescriptionCache } from '../../tools/ToolSearchTool/ToolSearchTool.js'
 import { logForDebugging } from '../debug.js'
+import { clearToolSchemaCache } from '../toolSchemaCache.js'
 import { updateHooksConfigSnapshot } from '../hooks/hooksConfigSnapshot.js'
 import {
   createDisabledBypassPermissionsContext,
@@ -37,6 +40,9 @@ export function applySettingsChange(
   const newSettings = getInitialSettings()
 
   logForDebugging(`Settings changed from ${source}, updating app state`)
+  clearToolSchemaCache()
+  clearAdapterToolSchemaCache()
+  clearToolSearchDescriptionCache()
 
   const updatedRules = loadAllPermissionRulesFromDisk()
   updateHooksConfigSnapshot()

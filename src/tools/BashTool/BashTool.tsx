@@ -285,14 +285,15 @@ For commands that are harder to parse at a glance (piped commands, obscure flags
   run_in_background: semanticBoolean(z.boolean().optional()).describe(`Set to true to run the whole command as a tracked background task. Use this for long-running servers, watchers, port-forwards, SSH tunnels, and foreground container runs. Do not put '&', 'nohup', 'disown', 'echo $!', 'docker compose up -d', or 'docker run -d' in the command; remove shell-level detaching and set this field instead.`),
   plan_only: semanticBoolean(z.boolean().optional()).describe('Set to true only when the user explicitly asks for a dry-run command plan. Normal commands execute directly.'),
   syntax_confirmed: semanticBoolean(z.boolean().optional()).describe('Deprecated compatibility flag. It has no effect; normal commands execute directly after safety and permission checks.'),
-  command_parts: bashCommandPartsSchema.optional().describe('Optional structured Bash command form. Tau compiles these parts into a safely quoted Bash command and blocks execution if command does not match the compiled result. Use this for complex external CLI syntax instead of hand-quoting raw Bash.'),
+  command_parts: bashCommandPartsSchema.optional().describe('Optional structured Bash command form. Tau compiles these parts into a safely quoted Bash command. If the compiled result does not exactly match `command`, the parts are ignored and `command` executes as written (the result notes this). Use this for complex external CLI syntax instead of hand-quoting raw Bash.'),
   dangerouslyDisableSandbox: semanticBoolean(z.boolean().optional()).describe('Set this to true to dangerously override sandbox mode and run commands without sandboxing.'),
   workdir: z.string().optional().describe('Deprecated internal/back-compat execution directory. The model-facing schema omits this field; encode target directories in the command with absolute paths or native CLI location flags.'),
   _simulatedSedEdit: z.object({
     filePath: z.string(),
     newContent: z.string()
   }).optional().describe('Internal: pre-computed sed edit result from preview'),
-  _workdirFromCd: z.boolean().optional().describe('Internal: set when a leading `cd <dir> &&` was converted into workdir, so the session cwd can persist like a real shell')
+  _workdirFromCd: z.boolean().optional().describe('Internal: set when a leading `cd <dir> &&` was converted into workdir, so the session cwd can persist like a real shell'),
+  _commandPartsNote: z.string().optional().describe('Internal: set by validateInput when command_parts were ignored (mismatch or malformed); surfaced to the model as a result note')
 }));
 
 // Always omit workdir, _simulatedSedEdit and _workdirFromCd from the
@@ -320,11 +321,13 @@ const inputSchema = lazySchema(() => {
     run_in_background: true,
     workdir: true,
     _simulatedSedEdit: true,
-    _workdirFromCd: true
+    _workdirFromCd: true,
+    _commandPartsNote: true
   }) : fullInputSchema().omit({
     workdir: true,
     _simulatedSedEdit: true,
-    _workdirFromCd: true
+    _workdirFromCd: true,
+    _commandPartsNote: true
   })).shape;
   return z.object(omittedShape);
 });
@@ -363,7 +366,8 @@ const outputSchema = lazySchema(() => z.object({
   structuredContent: z.array(z.any()).optional().describe('Structured content blocks'),
   persistedOutputPath: z.string().optional().describe('Path to the persisted full output in tool-results dir (set when output is too large for inline)'),
   persistedOutputSize: z.number().optional().describe('Total size of the output in bytes (set when output is too large for inline)'),
-  cwdNote: z.string().optional().describe('Model-facing note stating the directory the command ran in / session cwd changes')
+  cwdNote: z.string().optional().describe('Model-facing note stating the directory the command ran in / session cwd changes'),
+  commandPartsNote: z.string().optional().describe('Model-facing note stating that mismatched/malformed command_parts were ignored and `command` ran as written')
 }));
 type OutputSchema = ReturnType<typeof outputSchema>;
 export type Out = z.infer<OutputSchema>;
@@ -606,21 +610,23 @@ export const BashTool = buildTool({
         result: true
       };
     }
+    // command_parts is advisory: execution, permissions, and sandbox
+    // classification all run on the raw `command` string, with or without
+    // parts. The old byte-exact match requirement hard-blocked models that
+    // quote differently from our compiler (same argv, different quoting) or
+    // send degenerate parts (empty tokens), looping them on retries across
+    // providers. Instead of blocking, drop mismatched/malformed parts and run
+    // `command` as written — identical to the same call without parts — and
+    // tell the model via a result note so it stops sending bad parts.
     try {
       const commandPartsMatch = validateBashCommandPartsMatch(input.command, input.command_parts);
       if (commandPartsMatch && !commandPartsMatch.ok) {
-        return {
-          result: false,
-          message: commandPartsMatch.message ?? 'Blocked: command_parts did not match command.',
-          errorCode: 14
-        };
+        input._commandPartsNote = `command_parts ignored: they compile to \`${commandPartsMatch.compiledCommand}\` which does not match \`command\`; executed \`command\` as written. Omit command_parts unless they compile to the exact command.`;
+        delete input.command_parts;
       }
     } catch (error) {
-      return {
-        result: false,
-        message: error instanceof Error ? error.message : String(error),
-        errorCode: 14
-      };
+      input._commandPartsNote = `command_parts ignored (malformed: ${error instanceof Error ? error.message : String(error)}); executed \`command\` as written.`;
+      delete input.command_parts;
     }
     // Failure history remains available for diagnostics, but never becomes a
     // user-visible execution block. Path/command correction happens through
@@ -708,7 +714,8 @@ export const BashTool = buildTool({
     structuredContent,
     persistedOutputPath,
     persistedOutputSize,
-    cwdNote
+    cwdNote,
+    commandPartsNote
   }, toolUseID): ToolResultBlockParam {
     // Handle structured content
     if (structuredContent && structuredContent.length > 0) {
@@ -763,7 +770,7 @@ export const BashTool = buildTool({
     return {
       tool_use_id: toolUseID,
       type: 'tool_result',
-      content: [processedStdout, errorMessage, cwdNote ? `[${cwdNote}]` : '', backgroundInfo].filter(Boolean).join('\n'),
+      content: [processedStdout, errorMessage, cwdNote ? `[${cwdNote}]` : '', commandPartsNote ? `[${commandPartsNote}]` : '', backgroundInfo].filter(Boolean).join('\n'),
       is_error: interrupted
     };
   },
@@ -1096,6 +1103,7 @@ export const BashTool = buildTool({
       interrupted: wasInterrupted,
       isImage,
       cwdNote,
+      commandPartsNote: input._commandPartsNote,
       returnCodeInterpretation: interpretationResult?.message,
       noOutputExpected: isSilentBashCommand(input.command),
       backgroundTaskId: result.backgroundTaskId,
@@ -1282,6 +1290,24 @@ async function* runShellCommand({
   // regardless of the command type (isAutobackgroundingAllowed only applies to automatic backgrounding)
   // Skip if background tasks are disabled - run in foreground instead
   if (run_in_background === true && !isBackgroundTasksDisabled) {
+    // A command that already finished before it could be backgrounded never
+    // actually ran in the background: exec() returns createFailedCommand for a
+    // pre-spawn failure (missing workdir / deleted cwd) or createAbortedCommand
+    // for an abort, both already 'completed'/'killed' with no output file
+    // created. Registering it as a background task would hand back a phantom
+    // task ID and later emit a completion <task-notification> pointing at a
+    // nonexistent .output file — which TaskOutput and ToolOutputRetrieve then
+    // both fail to read. Surface the failure inline instead, exactly like the
+    // foreground path (a real spawn is still 'running' here, so it backgrounds
+    // normally).
+    if (shellCommand.status !== 'running') {
+      const result = await resultPromise;
+      shellCommand.cleanup();
+      if (result.preSpawnError) {
+        throw new Error(result.preSpawnError);
+      }
+      return result;
+    }
     const shellId = await spawnBackgroundTask();
     logEvent('tengu_bash_command_explicitly_backgrounded', {
       command_type: getCommandTypeForLogging(command)

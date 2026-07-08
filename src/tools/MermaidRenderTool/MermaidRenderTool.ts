@@ -6,13 +6,14 @@ import { z } from 'zod/v4'
 import { buildTool, type ToolDef } from '../../Tool.js'
 import { Text } from '../../ink.js'
 import { getCwd } from '../../utils/cwd.js'
+import { pathToLocalFileUrl } from '../../utils/fileUrls.js'
 import { lazySchema } from '../../utils/lazySchema.js'
 import { MERMAID_RENDER_TOOL_NAME } from './constants.js'
 
 const DESCRIPTION =
   'Write a Mermaid diagram and standalone HTML preview artifact.'
 
-const PROMPT = `Create a Mermaid .mmd file and a standalone HTML preview that renders it with Mermaid in the browser. This writes files under .tau/mermaid by default.
+const PROMPT = `Create a Mermaid .mmd file and a standalone HTML preview that renders it with Mermaid in the browser. This writes files under .tau/mermaid by default and returns absolute file paths plus canonical file:// URLs for browser tools.
 
 Use when a diagram should be reviewable visually in a browser or attached to a spec/report.`
 
@@ -29,7 +30,9 @@ type InputSchema = ReturnType<typeof inputSchema>
 const outputSchema = lazySchema(() =>
   z.object({
     sourcePath: z.string(),
+    sourceUrl: z.string(),
     htmlPath: z.string(),
+    htmlUrl: z.string(),
   }),
 )
 type OutputSchema = ReturnType<typeof outputSchema>
@@ -133,9 +136,25 @@ export const MermaidRenderTool = buildTool({
 `,
       'utf8',
     )
-    return { data: { sourcePath, htmlPath } }
+    return {
+      data: {
+        sourcePath,
+        sourceUrl: pathToLocalFileUrl(sourcePath),
+        htmlPath,
+        htmlUrl: pathToLocalFileUrl(htmlPath),
+      },
+    }
   },
   mapToolResultToToolResultBlockParam(output, toolUseID) {
-    return { type: 'tool_result', tool_use_id: toolUseID, content: `Mermaid source: ${output.sourcePath}\nHTML preview: ${output.htmlPath}` }
+    return {
+      type: 'tool_result',
+      tool_use_id: toolUseID,
+      content: [
+        `Mermaid source: ${output.sourcePath}`,
+        `Mermaid source URL: ${output.sourceUrl}`,
+        `HTML preview: ${output.htmlPath}`,
+        `HTML preview URL: ${output.htmlUrl}`,
+      ].join('\n'),
+    }
   },
 } satisfies ToolDef<InputSchema, Output>)

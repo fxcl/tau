@@ -219,6 +219,10 @@ export function AttachmentMessage({
           {plural(attachment.skillCount, 'skill')} available
         </Line>;
       }
+    case 'power_mode_change':
+      // /mode already prints its own confirmation; the attachment is for the
+      // model's context only.
+      return null;
     case 'agent_listing_delta':
       {
         if (attachment.isInitial || attachment.addedTypes.length === 0) {

@@ -51,7 +51,7 @@ import {
 import { getOpenAIOAuthToken, startOpenAIOAuthFlow, refreshOpenAIToken } from './openai_oauth.js'
 import {
   startKiloCodeOAuth, getKiloCodeOAuthToken,
-  startClineOAuth, getClineOAuthToken, refreshClineOAuth,
+  startClineOAuth, getClineOAuthToken, startClinePassOAuth, getClinePassOAuthToken, refreshClineOAuth,
   startIFlowOAuth, getIFlowOAuthToken, refreshIFlowOAuth,
   startCopilotOAuth, getValidCopilotOAuthToken, refreshCopilotOAuth,
   startKiroOAuth, getValidKiroOAuthToken, refreshKiroOAuth,
@@ -127,6 +127,8 @@ async function _getValidOAuthToken(provider: APIProvider): Promise<string | null
       return getKiloCodeOAuthToken()
     case 'cline':
       return getClineOAuthToken()
+    case 'clinepass':
+      return getClinePassOAuthToken()
     case 'iflow':
       return getIFlowOAuthToken()
     case 'copilot':
@@ -173,6 +175,8 @@ export async function startProviderOAuth(provider: APIProvider): Promise<{
       return startKiloCodeOAuth()
     case 'cline':
       return startClineOAuth()
+    case 'clinepass':
+      return startClinePassOAuth()
     case 'iflow':
       return startIFlowOAuth()
     case 'copilot':
@@ -224,6 +228,8 @@ export async function refreshProviderOAuth(provider: APIProvider): Promise<strin
       return refreshOpenAIToken(tokens.refreshToken)
     case 'cline':
       return refreshClineOAuth(tokens.refreshToken)
+    case 'clinepass':
+      return refreshClineOAuth(tokens.refreshToken, 'pass')
     case 'iflow':
       return refreshIFlowOAuth(tokens.refreshToken)
     case 'copilot':
@@ -292,7 +298,7 @@ export function clearProviderOAuth(provider: APIProvider): void {
   if (provider === 'antigravity') {
     deleteProviderKey('gemini_oauth_antigravity')
   }
-  if (provider === 'cline') {
+  if (provider === 'cline' || provider === 'clinepass') {
     void import('../providers/providerShim.js')
       .then(({ reloadClineLaneAuth }) => reloadClineLaneAuth())
       .catch(() => {})
@@ -330,6 +336,7 @@ function _envVarName(provider: APIProvider): string {
     minimax: 'MINIMAX_API_KEY',
     kilocode: '(OAuth only)',
     cline: '(OAuth only)',
+    clinepass: '(OAuth only)',
     iflow: '(OAuth only)',
     copilot: '(OAuth only)',
     kiro: '(OAuth only)',

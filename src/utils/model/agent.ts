@@ -2,6 +2,7 @@ import type { PermissionMode } from '../permissions/PermissionMode.js'
 import { capitalize } from '../stringUtils.js'
 import { MODEL_ALIASES, type ModelAlias } from './aliases.js'
 import { applyBedrockRegionPrefix, getBedrockRegionPrefix } from './bedrock.js'
+import { shouldInheritOpenRouterGptAlias } from './openaiGptModels.js'
 import {
   getCanonicalName,
   getRuntimeMainLoopModel,
@@ -135,7 +136,10 @@ function aliasMatchesParentTier(alias: string, parentModel: string): boolean {
     case 'opus':
       return canonical.includes('opus')
     case 'sonnet':
-      return canonical.includes('sonnet')
+      return (
+        canonical.includes('sonnet') ||
+        shouldInheritOpenRouterGptAlias(alias, parentModel, getAPIProvider())
+      )
     case 'haiku':
       return canonical.includes('haiku')
     default:

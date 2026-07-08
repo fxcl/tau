@@ -32,6 +32,7 @@ import { loadProviderKey } from '../auth/api_key_manager.js'
 import { getOpenAISessionToken } from '../auth/openai_oauth.js'
 import {
   getClineOAuthToken,
+  getClinePassOAuthToken,
   getIFlowApiKey, getIFlowOAuthToken,
   getKiloCodeOAuthToken, getKiloCodeOrgId,
   getCopilotOAuthToken,
@@ -200,6 +201,7 @@ function _laneNameForProvider(provider: APIProvider): string {
     case 'cloudflare':
       return 'openai-compat'
     case 'cline':
+    case 'clinepass':
       return 'cline'
     // Phase 4 / Phase 5 OAuth-backed OpenAI-compat providers — share
     // the lane; each gets its own model catalog + base URL branch.
@@ -266,7 +268,11 @@ function createProvider(provider: APIProvider): BaseProvider {
   if (_nativeLaneEnabledFor(provider)) {
     const laneName = _laneNameForProvider(provider)
     const lane = getLane(laneName)
-    if (lane && lane.isHealthy()) {
+    const providerAuthReady =
+      provider === 'cline' || provider === 'clinepass'
+        ? getProviderAuthMethod(provider) === 'oauth'
+        : true
+    if (lane && lane.isHealthy() && providerAuthReady) {
       // Pass the provider name as a hint so shared lanes (openai-compat)
       // can filter /v1/models per-provider — otherwise /models groq
       // returns the union of every compat provider's catalog.
@@ -365,6 +371,10 @@ function createProvider(provider: APIProvider): BaseProvider {
       throw new Error(
         'Cline chat requires the cline lane to be healthy. Run `/login cline` to complete the device login.',
       )
+    case 'clinepass':
+      throw new Error(
+        'Cline Pass chat requires the cline lane to be healthy. Run `/login cline pass` to complete the device login.',
+      )
     case 'iflow':
     case 'copilot':
       throw new Error(
@@ -428,13 +438,19 @@ function wrapAsAnthropicStream(
  *
  * Supports opts.signal (AbortSignal) and opts.timeout (ms) from claude.ts.
  */
-function createMethod(p: BaseProvider) {
+function createMethod(p: BaseProvider, source?: string) {
   return function create(params: Record<string, unknown>, opts?: Record<string, unknown>) {
     const isStreaming = params.stream === true
+    const paramsWithSource =
+      source &&
+      p instanceof LaneBackedProvider &&
+      typeof params.querySource !== 'string'
+        ? { ...params, querySource: source }
+        : params
     const outboundParams =
       p.name === 'cursor'
-        ? params
-        : sanitizeOutboundParamsForProvider(params)
+        ? paramsWithSource
+        : sanitizeOutboundParamsForProvider(paramsWithSource)
 
     // Extract signal and timeout from opts (claude.ts passes these).
     const externalSignal = opts?.signal as AbortSignal | undefined
@@ -529,9 +545,9 @@ function sanitizeOutboundParamsForProvider(
  *   anthropic.messages.create(params)
  *   for await (const part of stream) { ... }
  */
-export function createProviderShim(provider: APIProvider): unknown {
+export function createProviderShim(provider: APIProvider, source?: string): unknown {
   const p = createProvider(provider)
-  const create = createMethod(p)
+  const create = createMethod(p, source)
 
   return {
     beta: {
@@ -741,8 +757,9 @@ export async function reloadOpenAILaneAuth(): Promise<void> {
  */
 export async function reloadClineLaneAuth(): Promise<void> {
   const accessToken = getClineOAuthToken() ?? undefined
+  const clinePassAccessToken = getClinePassOAuthToken() ?? undefined
   const { clineLane } = await import('../../../lanes/cline/index.js')
-  clineLane.configure({ oauthToken: accessToken })
+  clineLane.configure({ oauthToken: accessToken, clinePassOAuthToken: clinePassAccessToken })
   clineLane.invalidateModelCache()
 }
 

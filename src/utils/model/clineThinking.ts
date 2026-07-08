@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 
-export type ClineEffort = 'none' | 'low' | 'medium' | 'high'
+export type ClineEffort = 'none' | 'low' | 'medium' | 'high' | 'xhigh'
 export type ClineWireEffort = Exclude<ClineEffort, 'none'>
 
 export const CLINE_EFFORT_LEVELS: readonly ClineEffort[] = [
@@ -10,7 +10,10 @@ export const CLINE_EFFORT_LEVELS: readonly ClineEffort[] = [
   'low',
   'medium',
   'high',
+  'xhigh',
 ]
+
+const CLINE_EFFORT_VARIANT_SEPARATOR = '::cline-effort='
 
 function storePath(): string {
   return process.env.TAU_CLINE_THINKING_STORE
@@ -21,7 +24,36 @@ let _loadedPath: string | null = null
 let _cache: Record<string, ClineEffort> = {}
 
 function normalizeStoreKey(model: string): string {
-  return model.trim().toLowerCase()
+  return stripClineEffortVariant(model).trim().toLowerCase()
+}
+
+export function isClineEffort(value: string): value is ClineEffort {
+  return (CLINE_EFFORT_LEVELS as readonly string[]).includes(value)
+}
+
+export function encodeClineEffortVariant(
+  modelId: string,
+  effort: ClineEffort,
+): string {
+  return `${modelId}${CLINE_EFFORT_VARIANT_SEPARATOR}${effort}`
+}
+
+export function parseClineEffortVariant(
+  modelId: string,
+): { modelId: string; effort?: ClineEffort } {
+  const markerIndex = modelId.lastIndexOf(CLINE_EFFORT_VARIANT_SEPARATOR)
+  if (markerIndex < 0) return { modelId }
+
+  const baseModelId = modelId.slice(0, markerIndex)
+  const effort = modelId.slice(markerIndex + CLINE_EFFORT_VARIANT_SEPARATOR.length)
+  if (!baseModelId || !isClineEffort(effort)) {
+    return { modelId }
+  }
+  return { modelId: baseModelId, effort }
+}
+
+export function stripClineEffortVariant(modelId: string): string {
+  return parseClineEffortVariant(modelId).modelId
 }
 
 function load(): void {
@@ -127,12 +159,16 @@ export function cycleClineEffort(
 }
 
 export function getClineEffortLabel(effort: ClineEffort): string {
-  return effort === 'none'
-    ? 'Off'
-    : effort.charAt(0).toUpperCase() + effort.slice(1)
+  if (effort === 'none') return 'Off'
+  if (effort === 'xhigh') return 'Extra High'
+  return effort.charAt(0).toUpperCase() + effort.slice(1)
 }
 
 export function getClineRequestEffort(model: string): ClineWireEffort | null {
+  const variant = parseClineEffortVariant(model)
+  if (variant.effort) {
+    return variant.effort === 'none' ? null : variant.effort
+  }
   const effort = getClineEffort(model)
   return effort === 'none' ? null : effort
 }

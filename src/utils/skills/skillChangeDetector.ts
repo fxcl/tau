@@ -168,6 +168,15 @@ export function dispose(): Promise<void> {
  */
 export const subscribe = skillsChanged.subscribe
 
+/**
+ * Manually notify subscribers that command/skill sources changed (e.g. a
+ * /mode power-mode switch toggles which sources load). Callers should clear
+ * the relevant caches first; subscribers re-fetch commands on this signal.
+ */
+export function notifyManualReload(): void {
+  skillsChanged.emit()
+}
+
 async function getWatchablePaths(): Promise<string[]> {
   const fs = getFsImplementation()
   const paths: string[] = []
@@ -307,5 +316,6 @@ export const skillChangeDetector = {
   initialize,
   dispose,
   subscribe,
+  notifyManualReload,
   resetForTesting,
 }

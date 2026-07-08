@@ -288,7 +288,7 @@ export async function getAnthropicClient({
     }
 
     // Return the shim cast as Anthropic — it quacks like an Anthropic client
-    return createProviderShim(currentProvider) as unknown as Anthropic
+    return createProviderShim(currentProvider, source) as unknown as Anthropic
   }
 
   const ARGS = {

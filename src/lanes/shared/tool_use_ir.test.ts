@@ -270,6 +270,31 @@ async function main(): Promise<void> {
     })
   }
 
+  await test('OpenRouter bridge derives side-query session id when none is explicit', async () => {
+    let captured: LaneProviderCallParams | null = null
+    const lane: Lane = {
+      ...mockLane([]),
+      async *streamAsProvider(params: LaneProviderCallParams) {
+        captured = params
+        return {
+          input_tokens: 0, output_tokens: 0,
+          cache_read_tokens: 0, cache_write_tokens: 0, thinking_tokens: 0,
+        }
+      },
+    }
+    const prov = new LaneBackedProvider(lane, 'openrouter')
+    const stream = await prov.stream({
+      model: 'qwen/qwen3.7-max',
+      messages: [],
+      max_tokens: 100,
+      querySource: 'model_validation',
+    } as any)
+    for await (const _ of stream) {}
+    assert(captured?.providerHint === 'openrouter', `providerHint=${captured?.providerHint}`)
+    assert(typeof captured?.sessionId === 'string' && captured.sessionId.startsWith('tau-query-'),
+      `sessionId=${captured?.sessionId}`)
+  })
+
   await test('Antigravity bridge preserves explicit request session id', async () => {
     let captured: LaneProviderCallParams | null = null
     const lane: Lane = {

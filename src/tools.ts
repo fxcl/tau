@@ -80,8 +80,15 @@ import { ToolGuideTool } from './tools/ToolGuideTool/ToolGuideTool.js'
 import { ProjectWorkflowTool } from './tools/ProjectWorkflowTool/ProjectWorkflowTool.js'
 import { TestSearchTool } from './tools/TestSearchTool/TestSearchTool.js'
 import { CodebaseRetrievalTool } from './tools/CodebaseRetrievalTool/CodebaseRetrievalTool.js'
+import { RepoContextScoutTool } from './tools/RepoContextScoutTool/RepoContextScoutTool.js'
+import { WorkflowRecipeTool } from './tools/WorkflowRecipeTool/WorkflowRecipeTool.js'
+import { ToolOutputRetrieveTool } from './tools/ToolOutputRetrieveTool/ToolOutputRetrieveTool.js'
+import { ChangeRiskTool } from './tools/ChangeRiskTool/ChangeRiskTool.js'
 import { GitHistorySearchTool } from './tools/GitHistorySearchTool/GitHistorySearchTool.js'
 import { InspectSiteTool } from './tools/InspectSiteTool/InspectSiteTool.js'
+import { WebBrowserTool } from './tools/WebBrowserTool/WebBrowserTool.js'
+import { ArtifactCanvasTool } from './tools/ArtifactCanvasTool/ArtifactCanvasTool.js'
+import { DiffArtifactTool } from './tools/DiffArtifactTool/DiffArtifactTool.js'
 import { PackageManagerTool } from './tools/PackageManagerTool/PackageManagerTool.js'
 import { SpecQuestTool } from './tools/SpecQuestTool/SpecQuestTool.js'
 import { MermaidRenderTool } from './tools/MermaidRenderTool/MermaidRenderTool.js'
@@ -103,6 +110,9 @@ import { TaskListTool } from './tools/TaskListTool/TaskListTool.js'
 import uniqBy from 'lodash-es/uniqBy.js'
 import { isToolSearchEnabledOptimistic } from './utils/toolSearch.js'
 import { isTodoV2Enabled } from './utils/tasks.js'
+import { filterDisabledPrebuiltTools } from './utils/prebuiltToolToggles.js'
+import { getPowerModeFromSettings } from './utils/powerMode.js'
+import { getInitialSettings } from './utils/settings/settings.js'
 // Dead code elimination: conditional import for CLAUDE_CODE_VERIFY_PLAN
 /* eslint-disable custom-rules/no-process-env-top-level, @typescript-eslint/no-require-imports */
 const VerifyPlanExecutionTool =
@@ -118,6 +128,7 @@ export {
   ASYNC_AGENT_ALLOWED_TOOLS,
   COORDINATOR_MODE_ALLOWED_TOOLS,
 } from './constants/tools.js'
+import { CHEAP_MODE_CORE_TOOL_NAME_SET } from './constants/cheapModeTools.js'
 import { feature } from 'bun:bundle'
 // Dead code elimination: conditional import for OVERFLOW_TEST_TOOL
 /* eslint-disable custom-rules/no-process-env-top-level, @typescript-eslint/no-require-imports */
@@ -130,9 +141,6 @@ const CtxInspectTool = feature('CONTEXT_COLLAPSE')
 const TerminalCaptureTool = feature('TERMINAL_PANEL')
   ? require('./tools/TerminalCaptureTool/TerminalCaptureTool.js')
       .TerminalCaptureTool
-  : null
-const WebBrowserTool = feature('WEB_BROWSER_TOOL')
-  ? require('./tools/WebBrowserTool/WebBrowserTool.js').WebBrowserTool
   : null
 const coordinatorModeModule = feature('COORDINATOR_MODE')
   ? (require('./coordinator/coordinatorMode.js') as typeof import('./coordinator/coordinatorMode.js'))
@@ -194,7 +202,7 @@ export function parseToolPreset(preset: string): ToolPreset | null {
  * @returns Array of tool names
  */
 export function getToolsForDefaultPreset(): string[] {
-  const tools = getAllBaseTools()
+  const tools = filterDisabledPrebuiltTools(getAllBaseTools(), getInitialSettings())
   const isEnabled = tools.map(tool => tool.isEnabled())
   return tools.filter((_, i) => isEnabled[i]).map(tool => tool.name)
 }
@@ -231,7 +239,7 @@ export function getAllBaseTools(): Tools {
     ...(process.env.USER_TYPE === 'ant' ? [ConfigTool] : []),
     ...(process.env.USER_TYPE === 'ant' ? [TungstenTool] : []),
     ...(SuggestBackgroundPRTool ? [SuggestBackgroundPRTool] : []),
-    ...(WebBrowserTool ? [WebBrowserTool] : []),
+    WebBrowserTool,
     ...(isTodoV2Enabled()
       ? [TaskCreateTool, TaskGetTool, TaskUpdateTool, TaskListTool]
       : []),
@@ -243,12 +251,18 @@ export function getAllBaseTools(): Tools {
     // SnapshotTool defaults ON. Opt out: TAU_SNAPSHOT_DISABLE=1.
     ...(isEnvTruthy(process.env.TAU_SNAPSHOT_DISABLE) ? [] : [SnapshotTool]),
     FileDiffTool,
+    DiffArtifactTool,
     ToolGuideTool,
     ProjectWorkflowTool,
     TestSearchTool,
     CodebaseRetrievalTool,
+    RepoContextScoutTool,
+    WorkflowRecipeTool,
+    ToolOutputRetrieveTool,
+    ChangeRiskTool,
     GitHistorySearchTool,
     InspectSiteTool,
+    ArtifactCanvasTool,
     PackageManagerTool,
     SpecQuestTool,
     MermaidRenderTool,
@@ -344,7 +358,19 @@ export const getTools = (permissionContext: ToolPermissionContext): Tools => {
     SYNTHETIC_OUTPUT_TOOL_NAME,
   ])
 
-  const tools = getAllBaseTools().filter(tool => !specialTools.has(tool.name))
+  const settings = getInitialSettings()
+  let tools = filterDisabledPrebuiltTools(
+    getAllBaseTools().filter(tool => !specialTools.has(tool.name)),
+    settings,
+  )
+
+  // Cheap power mode: reduce to the core allowlist. Agents, skills, and the
+  // auxiliary built-ins are removed along with the (already force-disabled)
+  // optional tools. Deterministic per mode, so the tool list — and with it
+  // the prompt cache prefix — stays stable within a session.
+  if (getPowerModeFromSettings(settings) === 'cheap') {
+    tools = tools.filter(tool => CHEAP_MODE_CORE_TOOL_NAME_SET.has(tool.name))
+  }
 
   // Filter out tools that are denied by the deny rules
   let allowedTools = filterToolsByDenyRules(tools, permissionContext)
@@ -388,8 +414,16 @@ export function assembleToolPool(
 ): Tools {
   const builtInTools = getTools(permissionContext)
 
+  // Cheap power mode ignores MCP tools entirely, including tools from
+  // servers that were already connected before a mid-session mode switch.
+  const effectiveMcpTools =
+    getPowerModeFromSettings(getInitialSettings()) === 'cheap' ? [] : mcpTools
+
   // Filter out MCP tools that are in the deny list
-  const allowedMcpTools = filterToolsByDenyRules(mcpTools, permissionContext)
+  const allowedMcpTools = filterToolsByDenyRules(
+    effectiveMcpTools,
+    permissionContext,
+  )
 
   // Sort each partition for prompt-cache stability, keeping built-ins as a
   // contiguous prefix. The server's claude_code_system_cache_policy places a
@@ -425,5 +459,8 @@ export function getMergedTools(
   mcpTools: Tools,
 ): Tools {
   const builtInTools = getTools(permissionContext)
+  if (getPowerModeFromSettings(getInitialSettings()) === 'cheap') {
+    return [...builtInTools]
+  }
   return [...builtInTools, ...mcpTools]
 }

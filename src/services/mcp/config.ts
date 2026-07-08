@@ -21,6 +21,7 @@ import { safeParseJSON } from '../../utils/json.js'
 import { logError } from '../../utils/log.js'
 import { getPluginMcpServers } from '../../utils/plugins/mcpPluginIntegration.js'
 import { loadAllPluginsCacheOnly } from '../../utils/plugins/pluginLoader.js'
+import { getPowerModeFromSettings } from '../../utils/powerMode.js'
 import { isSettingSourceEnabled } from '../../utils/settings/constants.js'
 import { getManagedFilePath } from '../../utils/settings/managedPath.js'
 import { isRestrictedToPluginOnly } from '../../utils/settings/pluginOnlyPolicy.js'
@@ -1077,6 +1078,12 @@ export async function getClaudeCodeMcpConfigs(
   servers: Record<string, ScopedMcpServerConfig>
   errors: PluginError[]
 }> {
+  // Cheap power mode ignores every MCP source (project .mcp.json, user,
+  // plugin, enterprise, CLI --mcp-config): no configs, no connections.
+  if (getPowerModeFromSettings(getInitialSettings()) === 'cheap') {
+    return { servers: {}, errors: [] }
+  }
+
   const { servers: enterpriseServers } = getMcpConfigsByScope('enterprise')
 
   // If an enterprise mcp config exists, do not use any others; this has exclusive control over all MCP servers
@@ -1259,6 +1266,11 @@ export async function getAllMcpConfigs(): Promise<{
   servers: Record<string, ScopedMcpServerConfig>
   errors: PluginError[]
 }> {
+  // Cheap power mode ignores all MCP sources, including claude.ai connectors.
+  if (getPowerModeFromSettings(getInitialSettings()) === 'cheap') {
+    return { servers: {}, errors: [] }
+  }
+
   // In enterprise mode, don't load claude.ai servers (enterprise has exclusive control)
   if (doesEnterpriseMcpConfigExist()) {
     return getClaudeCodeMcpConfigs()

@@ -186,6 +186,32 @@ const diagnosticsInputSchema = lazySchema(() =>
 )
 type DiagnosticsInputSchema = ReturnType<typeof diagnosticsInputSchema>
 
+type ZoomInput = z.infer<ZoomInputSchema>
+type DiagnosticsInput = z.infer<DiagnosticsInputSchema>
+
+function hasMeaningfulValue(value: unknown): boolean {
+  if (value === undefined || value === null) return false
+  if (Array.isArray(value)) return value.length > 0
+  if (typeof value === 'string') return value.trim().length > 0
+  return true
+}
+
+function normalizeZoomInput(input: ZoomInput): ZoomInput {
+  if (!hasMeaningfulValue(input.targets)) return input
+  if (!hasMeaningfulValue(input.filePath) && !hasMeaningfulValue(input.symbols)) return input
+  const out = { ...input }
+  delete out.filePath
+  delete out.symbols
+  return out
+}
+
+function normalizeDiagnosticsInput(input: DiagnosticsInput): DiagnosticsInput {
+  if (!hasMeaningfulValue(input.filePath) || !hasMeaningfulValue(input.directory)) return input
+  const out = { ...input }
+  delete out.directory
+  return out
+}
+
 function makeOutput(command: string, text: string): { data: AftOutput } {
   return { data: { command, text } }
 }
@@ -434,19 +460,14 @@ export const AFTZoomTool = buildTool({
     return true
   },
   getPath(input) {
+    input = normalizeZoomInput(input)
     if (input.filePath) return expandPath(input.filePath)
     const targets = input.targets
     const first = Array.isArray(targets) ? targets[0] : targets
     return first?.filePath ? expandPath(first.filePath) : getCwd()
   },
   async validateInput(input) {
-    if (input.targets !== undefined && input.filePath !== undefined) {
-      return {
-        result: false,
-        message: 'targets is mutually exclusive with filePath/symbols',
-        errorCode: 2,
-      }
-    }
+    input = normalizeZoomInput(input)
     if (input.targets === undefined && !input.filePath) {
       return {
         result: false,
@@ -458,6 +479,7 @@ export const AFTZoomTool = buildTool({
     return validateExistingPath(first, 'File')
   },
   async checkPermissions(input, context) {
+    input = normalizeZoomInput(input)
     const paths =
       input.targets === undefined
         ? input.filePath
@@ -477,6 +499,7 @@ export const AFTZoomTool = buildTool({
   renderToolUseMessage: renderAftToolUseMessage,
   renderToolResultMessage: renderAftToolResultMessage,
   async call(input) {
+    input = normalizeZoomInput(input)
     const contextLines = input.contextLines
     if (input.targets !== undefined) {
       const targets = Array.isArray(input.targets) ? input.targets : [input.targets]
@@ -686,19 +709,15 @@ export const AFTDiagnosticsTool = buildTool({
     return true
   },
   getPath(input) {
+    input = normalizeDiagnosticsInput(input)
     return expandPath(input.filePath ?? input.directory ?? getCwd())
   },
   async validateInput(input) {
-    if (input.filePath && input.directory) {
-      return {
-        result: false,
-        message: 'filePath and directory are mutually exclusive',
-        errorCode: 2,
-      }
-    }
+    input = normalizeDiagnosticsInput(input)
     return validateExistingPath(input.filePath ?? input.directory, 'Path')
   },
   async checkPermissions(input, context) {
+    input = normalizeDiagnosticsInput(input)
     return checkReadPermissionsForPaths(
       AFTDiagnosticsTool,
       input,
@@ -710,6 +729,7 @@ export const AFTDiagnosticsTool = buildTool({
   renderToolUseMessage: renderAftToolUseMessage,
   renderToolResultMessage: renderAftToolResultMessage,
   async call(input) {
+    input = normalizeDiagnosticsInput(input)
     return runAftText(
       'lsp_diagnostics',
       {

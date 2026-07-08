@@ -11,10 +11,11 @@ import {
 import { createElement } from 'react'
 import { z } from 'zod/v4'
 
-import { buildTool, type ToolDef } from '../../Tool.js'
+import { buildTool, toolMatchesName, type ToolDef } from '../../Tool.js'
 import { Text } from '../../ink.js'
 import { getCwd } from '../../utils/cwd.js'
 import { lazySchema } from '../../utils/lazySchema.js'
+import { PROJECT_WORKFLOW_TOOL_NAME } from '../ProjectWorkflowTool/constants.js'
 import { TEST_SEARCH_TOOL_NAME } from './constants.js'
 
 const DESCRIPTION =
@@ -23,6 +24,10 @@ const DESCRIPTION =
 const PROMPT = `Find likely related test files for a source file, or likely source files for a test file. This tool is read-only and uses local filename/path heuristics.
 
 Use when editing code, triaging a failing test, or deciding what focused tests to run. Pair with ProjectWorkflow to choose the actual test command.`
+
+const PROMPT_WITHOUT_PROJECT_WORKFLOW = `Find likely related test files for a source file, or likely source files for a test file. This tool is read-only and uses local filename/path heuristics.
+
+Use when editing code, triaging a failing test, or deciding what focused tests to run. Use repo scripts or focused package/directory commands to choose the actual test command.`
 
 function renderText(message: string): React.ReactNode {
   return createElement(Text, null, message)
@@ -91,6 +96,7 @@ const outputSchema = lazySchema(() =>
     matches: z.array(matchSchema),
     searchedFiles: z.number(),
     truncated: z.boolean(),
+    projectWorkflowAvailable: z.boolean().optional(),
   }),
 )
 type OutputSchema = ReturnType<typeof outputSchema>
@@ -235,8 +241,12 @@ export const TestSearchTool = buildTool({
   async description() {
     return DESCRIPTION
   },
-  async prompt() {
-    return PROMPT
+  async prompt(options) {
+    return options.tools.some(tool =>
+      toolMatchesName(tool, PROJECT_WORKFLOW_TOOL_NAME),
+    )
+      ? PROMPT
+      : PROMPT_WITHOUT_PROJECT_WORKFLOW
   },
   get inputSchema(): InputSchema {
     return inputSchema()
@@ -288,7 +298,7 @@ export const TestSearchTool = buildTool({
       `${output.matches.length} match(es) from ${output.searchedFiles} file(s)`,
     )
   },
-  async call(input) {
+  async call(input, context) {
     const cwd = getCwd()
     const root = resolvePath(input.root ?? cwd, cwd)
     const target = resolvePath(input.filePath, cwd)
@@ -313,6 +323,9 @@ export const TestSearchTool = buildTool({
         matches,
         searchedFiles: files.length,
         truncated,
+        projectWorkflowAvailable: context.options.tools.some(tool =>
+          toolMatchesName(tool, PROJECT_WORKFLOW_TOOL_NAME),
+        ),
       },
     }
   },
@@ -330,7 +343,9 @@ export const TestSearchTool = buildTool({
               `- ${match.relativePath} (score ${match.score}): ${match.reason}`,
           )
         : [
-            '- none found. Use ProjectWorkflow to identify test commands, then run focused tests by package or directory if available.',
+            output.projectWorkflowAvailable === false
+              ? '- none found. Use repo scripts or focused package/directory tests if available.'
+              : '- none found. Use ProjectWorkflow to identify test commands, then run focused tests by package or directory if available.',
           ]),
     ]
     return {

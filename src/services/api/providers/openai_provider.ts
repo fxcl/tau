@@ -38,6 +38,8 @@ import {
   anthropicMessagesToOpenAI,
   anthropicToolsToOpenAI,
   coalesceConsecutiveMessages,
+  type OpenAIMessage,
+  type OpenAITool,
 } from '../adapters/anthropic_to_openai.js'
 import {
   openAIStreamToAnthropicEvents,
@@ -316,6 +318,7 @@ export class OpenAIProvider extends BaseProvider {
     // Send reasoning_effort for Codex / o-series models.
     const effort = this.resolveReasoningEffort(model, optimized.thinking)
     if (effort) body.reasoning_effort = effort
+    this.finalizeChatCompletionsBody(body, model, optimized, messages, tools)
 
     const ac = new AbortController()
     const response = await fetch(`${this.baseUrl}/chat/completions`, {
@@ -385,6 +388,7 @@ export class OpenAIProvider extends BaseProvider {
     // Send reasoning_effort for Codex / o-series models.
     const effort = this.resolveReasoningEffort(model, optimized.thinking)
     if (effort) body.reasoning_effort = effort
+    this.finalizeChatCompletionsBody(body, model, optimized, messages, tools)
 
     const response = await fetch(`${this.baseUrl}/chat/completions`, {
       method: 'POST',
@@ -547,6 +551,14 @@ export class OpenAIProvider extends BaseProvider {
       ...this.extraHeaders,
     }
   }
+
+  protected finalizeChatCompletionsBody(
+    _body: Record<string, unknown>,
+    _model: string,
+    _params: ProviderRequestParams,
+    _messages: OpenAIMessage[],
+    _tools: OpenAITool[] | undefined,
+  ): void {}
 
   private _adoptRequestSessionId(sessionId: string | undefined): void {
     const trimmed = sessionId?.trim()

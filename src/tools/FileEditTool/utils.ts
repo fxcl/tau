@@ -321,8 +321,17 @@ export function getPatchForEdits({
             edit.replace_all,
           )
 
-    // If this edit didn't change anything, throw an error
-    if (updatedFile === previousContent) {
+    // This edit produced no change. Distinguish the two ways that happens:
+    //   - old_string === new_string: an idempotent no-op — the requested text
+    //     is already exactly what's there. NOT an error. Erroring here made
+    //     every model loop (Edit path) and surfaced the misleading "String not
+    //     found" on the apply_patch/codex path, since both share this function.
+    //   - old_string !== new_string: old_string genuinely wasn't found — a real
+    //     error the model must see so it can re-read and retry.
+    if (
+      updatedFile === previousContent &&
+      edit.old_string !== edit.new_string
+    ) {
       throw new Error('String not found in file. Failed to apply edit.')
     }
 
@@ -330,11 +339,12 @@ export function getPatchForEdits({
     appliedNewStrings.push(edit.new_string)
   }
 
-  if (updatedFile === fileContents) {
-    throw new Error(
-      'Original and edited file match exactly. Failed to apply edit.',
-    )
-  }
+  // updatedFile === fileContents here means the whole set was a net no-op
+  // (identical old/new edits, or edits that cancel out). Fall through and
+  // return an empty patch rather than throwing: callers (FileEditTool.call and
+  // the apply_patch executor) detect updatedFile === fileContents and report
+  // "no changes made" instead of erroring and looping. getPatchFromContents on
+  // identical content yields [] naturally.
 
   // We already have before/after content, so call getPatchFromContents directly.
   // Previously this went through getPatchForDisplay with edits=[{old:fileContents,new:updatedFile}],

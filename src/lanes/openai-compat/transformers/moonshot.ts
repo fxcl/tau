@@ -9,12 +9,9 @@
 import type { Transformer, TransformContext } from './base.js'
 import type { OpenAIChatMessage, OpenAIChatRequest } from './shared_types.js'
 import {
-  MOONSHOT_MODELS,
-  cloneMoonshotModelInfo,
-  isMoonshotChatModelId,
+  filterMoonshotModelCatalog,
   isMoonshotThinkingModel,
   normalizeMoonshotModelId,
-  toMoonshotModelInfo,
 } from '../../../utils/model/moonshotCatalog.js'
 
 export const moonshotTransformer: Transformer = {
@@ -24,23 +21,12 @@ export const moonshotTransformer: Transformer = {
 
   supportsStrictMode: () => false,
 
-  staticCatalog() {
-    return MOONSHOT_MODELS.map(cloneMoonshotModelInfo)
-  },
-
   preferLiveModelCatalog() {
     return true
   },
 
   filterModelCatalog(models) {
-    const seen = new Set<string>()
-    const out = []
-    for (const model of models) {
-      if (!isMoonshotChatModelId(model.id) || seen.has(model.id)) continue
-      seen.add(model.id)
-      out.push(toMoonshotModelInfo(model))
-    }
-    return out.length > 0 ? out : MOONSHOT_MODELS.map(cloneMoonshotModelInfo)
+    return filterMoonshotModelCatalog(models)
   },
 
   clampMaxTokens(requested: number): number {

@@ -2,6 +2,10 @@ import { feature } from 'bun:bundle'
 import { isReplBridgeActive } from '../../bootstrap/state.js'
 import { getFeatureValue_CACHED_MAY_BE_STALE } from '../../services/analytics/growthbook.js'
 import type { Tool } from '../../Tool.js'
+import { providerSupportsAnthropicToolSearch } from '../../utils/model/providerCapabilities.js'
+import { getAPIProvider } from '../../utils/model/providers.js'
+import { getPowerModeFromSettings } from '../../utils/powerMode.js'
+import { getInitialSettings } from '../../utils/settings/settings.js'
 import { AGENT_TOOL_NAME } from '../AgentTool/constants.js'
 
 // Dead code elimination: Brief tool name only needed when KAIROS or KAIROS_BRIEF is on
@@ -60,6 +64,33 @@ Query forms:
  * _meta['anthropic/alwaysLoad']). This check runs first, before any other rule.
  */
 export function isDeferredTool(tool: Tool): boolean {
+  // Power-mode gate — nothing is deferred in these cases. On the native
+  // (non-Anthropic) lanes a deferred tool is physically dropped from the
+  // request and reaches the model as a name-only stub, so the model calls it
+  // blind (TaskCreate, WebFetch, NotebookEdit, …) and the call fails schema
+  // validation before it can recover. Sending every schema upfront makes tool
+  // calling behave identically on every provider with zero first-call
+  // failures, and with zero deferred tools ToolSearch drops out of the request
+  // automatically (claude.ts / native lazy paths both guard on "no deferred
+  // tools").
+  //
+  //   - cheap: never defer, on any provider. The cheap tool set is a small
+  //     fixed allowlist so deferral saves almost nothing, and MCP tools are
+  //     already excluded from the pool, so this can't pull MCP into the prompt.
+  //   - normal (the default): never defer on a native lane — the schema-fail
+  //     case above. First-party Anthropic (and Bedrock/Vertex/Foundry) keep
+  //     server-side defer_loading, which is invisible to the model and never
+  //     fails, so they still defer here.
+  //   - full (retired/hidden): unchanged — defers as before.
+  const powerMode = getPowerModeFromSettings(getInitialSettings())
+  if (powerMode === 'cheap') return false
+  if (
+    powerMode === 'normal' &&
+    !providerSupportsAnthropicToolSearch(getAPIProvider())
+  ) {
+    return false
+  }
+
   // Explicit opt-out via _meta['anthropic/alwaysLoad'] — tool appears in the
   // initial prompt with full schema. Checked first so MCP tools can opt out.
   if (tool.alwaysLoad === true) return false

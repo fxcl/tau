@@ -65,6 +65,11 @@ import { count } from '../../utils/array.js'
 import { createAttachmentMessage } from '../../utils/attachments.js'
 import { logForDebugging } from '../../utils/debug.js'
 import {
+  filterDisabledPrebuiltTools,
+  isOptionalPrebuiltToolName,
+} from '../../utils/prebuiltToolToggles.js'
+import { getInitialSettings } from '../../utils/settings/settings.js'
+import {
   AbortError,
   errorMessage,
   getErrnoCode,
@@ -353,7 +358,10 @@ export async function* runToolUse(
   // (e.g., old transcripts calling "KillShell" which is now an alias for "TaskStop")
   // Only fall back for tools where the name matches an alias, not the primary name
   if (!tool) {
-    const fallbackTool = findToolByName(getAllBaseTools(), toolName)
+    const fallbackTool = findToolByName(
+      filterDisabledPrebuiltTools(getAllBaseTools(), getInitialSettings()),
+      toolName,
+    )
     // Only use fallback if the tool was found via alias (deprecated name)
     if (fallbackTool && fallbackTool.aliases?.includes(toolName)) {
       tool = fallbackTool
@@ -372,6 +380,29 @@ export async function* runToolUse(
 
   // Check if the tool exists
   if (!tool) {
+    if (isOptionalPrebuiltToolName(toolName)) {
+      const content =
+        'The requested optional prebuilt tool is disabled or unavailable in this session. Continue with the available tools.'
+      logForDebugging(
+        `Optional prebuilt tool unavailable ${toolName}: ${toolUse.id}`,
+      )
+      yield {
+        message: createUserMessage({
+          content: [
+            {
+              type: 'tool_result',
+              content,
+              is_error: false,
+              tool_use_id: toolUse.id,
+            },
+          ],
+          toolUseResult: content,
+          sourceToolAssistantUUID: assistantMessage.uuid,
+        }),
+      }
+      return
+    }
+
     const sanitizedToolName = sanitizeToolNameForAnalytics(toolName)
     logForDebugging(`Unknown tool ${toolName}: ${toolUse.id}`)
     logEvent('tengu_tool_use_error', {
@@ -576,9 +607,11 @@ function streamedCheckPermissionsAndCallTool(
 
 /**
  * Appended to Zod errors when a deferred tool wasn't in the discovered-tool
- * set — re-runs the claude.ts schema-filter scan dispatch-time to detect the
- * mismatch. The raw Zod error ("expected array, got string") doesn't tell the
- * model to re-load the tool; this hint does. Null if the schema was sent.
+ * set on the request that produced the call. The raw Zod error ("expected
+ * array, got string") doesn't tell the model why it missed schema details.
+ * A direct failed tool_use is now enough to load the schema on the next retry,
+ * so the hint steers the model to retry directly instead of spending a turn on
+ * ToolSearch.
  */
 export function buildSchemaNotSentHint(
   tool: Tool,
@@ -595,9 +628,8 @@ export function buildSchemaNotSentHint(
   const discovered = extractDiscoveredToolNames(messages)
   if (discovered.has(tool.name)) return null
   return (
-    `\n\nThis tool's schema was not sent to the API — it was not in the discovered-tool set derived from message history. ` +
-    `Without the schema in your prompt, typed parameters (arrays, numbers, booleans) get emitted as strings and the client-side parser rejects them. ` +
-    `Load the tool first: call ${TOOL_SEARCH_TOOL_NAME} with query "select:${tool.name}", then retry this call.`
+    `\n\nThis tool's schema was not sent to the API for the attempted call — it was not loaded in the request that produced this tool_use. ` +
+    `This failed direct call will load ${tool.name}'s schema for the next request. Retry ${tool.name} directly using the expected schema above; do not call ${TOOL_SEARCH_TOOL_NAME} first.`
   )
 }
 

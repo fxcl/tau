@@ -37,6 +37,7 @@ export interface OpenAIToolCall {
 
 export interface OpenAITool {
   type: 'function'
+  cache_control?: { type: string }
   function: {
     name: string
     description?: string

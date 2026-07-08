@@ -8,8 +8,13 @@
  *   drops/normalizes it for upstreams that do not use explicit breakpoints.
  * - Accepts `reasoning: { effort }` for reasoning-capable upstreams.
  * - Sends OpenRouter session affinity/cache fields when a stable session id is present.
- * - Enables OpenRouter context-compression by default so over-context prompts
- *   use the gateway's middle-out compressor instead of failing.
+ * - OPENROUTER_PROVIDER_ORDER can pin upstream provider routing. OpenRouter's
+ *   session-id sticky routing is BEST-EFFORT: multi-provider pools (e.g.
+ *   deepseek/*) re-route under load, and every re-route is a full prompt-cache
+ *   cold start on the new provider even when the prefix is byte-stable. A
+ *   pinned order makes the cache chain deterministic.
+ * - Can enable OpenRouter context-compression by env so over-context prompts
+ *   may use the gateway's middle-out compressor instead of failing.
  * - Honors `function.strict: true` for the underlying model.
  * - `transforms`/`route`/`models` are OpenRouter-specific fields that
  *   pass through as-is.
@@ -17,6 +22,10 @@
 
 import type { Transformer, TransformContext, HeaderContext } from './base.js'
 import type { OpenAIChatRequest } from './shared_types.js'
+import {
+  isOpenAIStrictOnOpenRouter,
+  normalizeOpenAIStrictToolSchema,
+} from '../../../utils/model/openrouterStrictSchema.js'
 
 export const openrouterTransformer: Transformer = {
   id: 'openrouter',
@@ -61,6 +70,7 @@ export const openrouterTransformer: Transformer = {
 
     applyOpenRouterToolCacheBreakpoint(body)
     applyOpenRouterContextCompressionPlugin(body)
+    applyOpenRouterProviderRouting(body, ctx.sessionId)
 
     // Only emit the reasoning knob for models that actually support it.
     // Llama-4 / prompt-guard / base-chat Llamas routed via Vertex return
@@ -86,8 +96,9 @@ export const openrouterTransformer: Transformer = {
   // Other upstreams on OR (Anthropic, OpenAI, Llama, …) accept the
   // base shape, so the sanitizer is gated on the model id.
   sanitizeToolSchemaExtra(schema: Record<string, unknown>, modelId: string): Record<string, unknown> {
-    if (!isGeminiOnOR(modelId)) return schema
-    return sanitizeGeminiSchema(schema) as Record<string, unknown>
+    if (isGeminiOnOR(modelId)) return sanitizeGeminiSchema(schema) as Record<string, unknown>
+    if (isOpenAIStrictOnOpenRouter(modelId)) return normalizeOpenAIStrictToolSchema(schema)
+    return schema
   },
 
   // Per-model default generation params. OpenRouter hosts many
@@ -144,6 +155,9 @@ export const openrouterTransformer: Transformer = {
     // OpenRouter cache-control provider options broadly, and OpenRouter's
     // current schema accepts cache_control content parts generally. The lane
     // still keeps volatile env/date/git context out of stamped messages.
+    // Within last-only the lane branches per family: Anthropic-style rolling
+    // trailing stamps for most models, a single quantized anchor for
+    // google/gemini-* (see or_gemini_cache.ts).
     void model
     return 'last-only'
   },
@@ -159,6 +173,11 @@ function applyOpenRouterToolCacheBreakpoint(body: OpenAIChatRequest): void {
   // schema prefix without spending one breakpoint per tool. Together with
   // system + two rolling message markers this stays within Anthropic's
   // four-breakpoint budget while helping OpenRouter tool-heavy turns.
+  // For Gemini upstreams this stamp is inert on its own (live-measured: no
+  // reads, no writes, never billed), but combined with the lane's single
+  // message anchor (or_gemini_cache.ts) it is the recipe that reliably
+  // triggers Gemini's synchronous explicit cache from turn 1 — so it stays
+  // applied for every OpenRouter model family.
   const lastTool = body.tools[body.tools.length - 1]
   if (lastTool && !lastTool.cache_control) {
     lastTool.cache_control = { type: 'ephemeral' }
@@ -196,6 +215,108 @@ function resolveOpenRouterCacheRetention(): OpenRouterCacheRetention {
   return 'short'
 }
 
+// ── Session→served-provider auto-pin ─────────────────────────────
+//
+// OpenRouter's session_id stickiness is BEST-EFFORT: multi-provider pools
+// (deepseek/*, qwen/*, …) silently re-route under load, and every re-route is
+// a full upstream prompt-cache cold start (measured: 8 resets in a 31-request
+// session with session_id + prompt_cache_key on every call). Response chunks
+// name the provider that actually served each request, so the lane records it
+// and PINS the next request via provider.order. allow_fallbacks stays ON so
+// availability is never sacrificed — if OR falls back anyway, the fallback
+// provider is recorded and becomes the new pin. Explicit
+// OPENROUTER_PROVIDER_ORDER always wins; disable with TAU_OPENROUTER_AUTO_PIN=0.
+const _servedProviderBySession = new Map<string, string>()
+
+export function recordOpenRouterServedProvider(
+  sessionId: string | undefined,
+  model: string,
+  servedProvider: string,
+): void {
+  if (!sessionId) return
+  const slug = normalizeOpenRouterProviderSlug(servedProvider)
+  if (!slug) return
+  const key = `${sessionId}:${model.toLowerCase()}`
+  const prev = _servedProviderBySession.get(key)
+  if (prev !== slug && process.env.TAU_CACHE_DEBUG) {
+    // A provider switch means this request ran against a cold upstream
+    // cache. Surfacing it separates routing misses from prefix churn.
+    console.error(
+      `[tau-or] ${model} served by "${slug}"${prev ? ` (was "${prev}")` : ''}`,
+    )
+  }
+  _servedProviderBySession.set(key, slug)
+  if (_servedProviderBySession.size > 512) {
+    const oldest = _servedProviderBySession.keys().next().value
+    if (oldest !== undefined) _servedProviderBySession.delete(oldest)
+  }
+}
+
+/**
+ * The response `provider` field is a display name ("DeepSeek",
+ * "Amazon Bedrock"); `provider.order` wants slugs ("deepseek",
+ * "amazon-bedrock").
+ */
+function normalizeOpenRouterProviderSlug(name: string): string {
+  return name.trim().toLowerCase().replace(/\s+/g, '-')
+}
+
+export function _resetOpenRouterAutoPinForTest(): void {
+  _servedProviderBySession.clear()
+}
+
+/**
+ * Provider routing, two layers:
+ *  1. Explicit env pin: OPENROUTER_PROVIDER_ORDER="deepseek,fireworks" (or
+ *     CLAUDEX_-prefixed) becomes `provider: { order: [...] }`, plus
+ *     OPENROUTER_ALLOW_FALLBACKS=false → `allow_fallbacks: false`.
+ *  2. Auto-pin (default on): re-use the provider that served this
+ *     session+model last, keeping the upstream prompt cache warm.
+ */
+function applyOpenRouterProviderRouting(
+  body: OpenAIChatRequest,
+  sessionId?: string,
+): void {
+  const bag = body as unknown as Record<string, unknown>
+  const raw = (
+    process.env.CLAUDEX_OPENROUTER_PROVIDER_ORDER
+    ?? process.env.OPENROUTER_PROVIDER_ORDER
+    ?? ''
+  ).trim()
+  const explicitOrder = raw ? raw.split(',').map(s => s.trim()).filter(Boolean) : []
+
+  if (explicitOrder.length > 0) {
+    const provider = (
+      bag.provider && typeof bag.provider === 'object' ? bag.provider : {}
+    ) as Record<string, unknown>
+    if (provider.order === undefined) provider.order = explicitOrder
+
+    const fallbacks = (
+      process.env.CLAUDEX_OPENROUTER_ALLOW_FALLBACKS
+      ?? process.env.OPENROUTER_ALLOW_FALLBACKS
+      ?? ''
+    ).trim().toLowerCase()
+    if (['false', '0', 'off', 'no'].includes(fallbacks)) {
+      provider.allow_fallbacks = false
+    }
+    bag.provider = provider
+    return
+  }
+
+  if (process.env.TAU_OPENROUTER_AUTO_PIN === '0') return
+  if (!sessionId) return
+  const pinned = _servedProviderBySession.get(`${sessionId}:${body.model.toLowerCase()}`)
+  if (!pinned) return
+
+  const provider = (
+    bag.provider && typeof bag.provider === 'object' ? bag.provider : {}
+  ) as Record<string, unknown>
+  // allow_fallbacks stays default (true): availability first — a fallback
+  // response gets recorded and becomes the new pin.
+  if (provider.order === undefined) provider.order = [pinned]
+  bag.provider = provider
+}
+
 function resolveOpenRouterContextCompressionMode(): OpenRouterContextCompressionMode {
   const raw = (
     process.env.CLAUDEX_OPENROUTER_CONTEXT_COMPRESSION
@@ -203,26 +324,26 @@ function resolveOpenRouterContextCompressionMode(): OpenRouterContextCompression
     ?? ''
   ).trim().toLowerCase()
 
-  if (raw === 'none' || raw === 'off' || raw === 'false' || raw === '0' || raw === 'disabled') {
-    return 'disabled'
+  if (raw === 'on' || raw === 'true' || raw === '1' || raw === 'enabled') {
+    return 'enabled'
   }
-  return 'enabled'
+  return 'disabled'
 }
 
 function applyOpenRouterContextCompressionPlugin(body: OpenAIChatRequest): void {
   const mode = resolveOpenRouterContextCompressionMode()
   const existing = body.plugins?.find(plugin => plugin.id === 'context-compression')
-  if (existing) {
-    if (mode === 'disabled') existing.enabled = false
+  if (mode === 'disabled') {
+    if (existing) existing.enabled = false
     return
   }
 
   body.plugins = body.plugins ?? []
-  body.plugins.push(
-    mode === 'disabled'
-      ? { id: 'context-compression', enabled: false }
-      : { id: 'context-compression' },
-  )
+  if (existing) {
+    delete existing.enabled
+    return
+  }
+  body.plugins.push({ id: 'context-compression' })
 }
 
 function isGeminiOnOR(model: string): boolean {

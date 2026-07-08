@@ -35,6 +35,41 @@ function restoreEnv(key: string, value: string | undefined): void {
   }
 }
 
+async function assertLiveModelCatalogBypassesCache(
+  provider: 'minimax' | 'moonshot',
+  ids: readonly [string, string],
+): Promise<void> {
+  const lane = new OpenAICompatLane()
+  const baseUrl =
+    provider === 'minimax'
+      ? 'https://api.minimax.io/v1'
+      : 'https://api.moonshot.ai/v1'
+  lane.registerProvider(provider, `${provider}-token`, baseUrl)
+
+  const oldFetch = globalThis.fetch
+  let calls = 0
+  try {
+    globalThis.fetch = (async () => {
+      const id = ids[Math.min(calls, ids.length - 1)]
+      calls += 1
+      return new Response(JSON.stringify({
+        object: 'list',
+        data: [{ id }],
+      }), { status: 200 })
+    }) as unknown as typeof fetch
+
+    const first = await lane.listModels(provider)
+    const second = await lane.listModels(provider)
+
+    assert(calls === 2, `${provider} /models should be fetched twice, calls=${calls}`)
+    assert(first[0]?.id === ids[0], `${provider} first id=${first[0]?.id}`)
+    assert(second[0]?.id === ids[1], `${provider} second id=${second[0]?.id}`)
+  } finally {
+    globalThis.fetch = oldFetch
+    lane.unregisterProvider(provider)
+  }
+}
+
 type CapturedRequest = {
   url: string
   headers: Record<string, string>
@@ -557,6 +592,14 @@ async function captureModelRouterRequest(
 async function main(): Promise<void> {
   console.log('openai-compat cache affinity:')
 
+  await test('MiniMax /models bypasses the compat catalog cache', async () => {
+    await assertLiveModelCatalogBypassesCache('minimax', ['MiniMax-M3', 'MiniMax-M4'])
+  })
+
+  await test('Moonshot /models bypasses the compat catalog cache', async () => {
+    await assertLiveModelCatalogBypassesCache('moonshot', ['kimi-k2.7-code', 'kimi-k2.8-code'])
+  })
+
   await test('sends prompt_cache_key and affinity headers from session id', async () => {
     const { request } = await captureCopilotRequest('session-fixed')
     assert(request.url === 'https://api.githubcopilot.com/chat/completions', `url=${request.url}`)
@@ -808,7 +851,11 @@ async function main(): Promise<void> {
       const lastSystemPart = sys.content[sys.content.length - 1]
       assert(lastSystemPart?.cache_control?.type === 'ephemeral',
         `${model} system last part missing cache_control: ${JSON.stringify(lastSystemPart)}`)
-      const user = request.body.messages.find((m: any) => m.role === 'user')
+      // Last user message = the real trailing turn. The FIRST user message can
+      // be the pinned <dynamic_context> block, which is deliberately unstamped
+      // (see the volatile-context test above).
+      const userMessages = request.body.messages.filter((m: any) => m.role === 'user')
+      const user = userMessages[userMessages.length - 1]
       assert(Array.isArray(user?.content), `${model} user content not promoted: ${JSON.stringify(user?.content)}`)
       const lastUserPart = user.content[user.content.length - 1]
       assert(lastUserPart?.cache_control?.type === 'ephemeral',

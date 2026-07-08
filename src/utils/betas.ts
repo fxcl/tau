@@ -28,6 +28,7 @@ import { isEnvDefinedFalsy, isEnvTruthy } from './envUtils.js'
 import { getCanonicalName } from './model/model.js'
 import { get3PModelCapabilityOverride } from './model/modelSupportOverrides.js'
 import { getAPIProvider } from './model/providers.js'
+import { providerSplitsSystemBoundary } from './systemBoundaryProviders.js'
 import { getInitialSettings } from './settings/settings.js'
 
 /**
@@ -231,6 +232,24 @@ export function shouldUseGlobalCacheScope(): boolean {
     getAPIProvider() === 'firstParty' &&
     !isEnvTruthy(process.env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS)
   )
+}
+
+/**
+ * Whether to insert the SYSTEM_PROMPT_DYNAMIC_BOUNDARY marker into the system
+ * prompt. The marker is inert — it never reaches the wire; consumers slice on
+ * it and drop it.
+ *
+ * First-party emits it to anchor global-scope prompt caching. The native lanes
+ * (see {@link providerSplitsSystemBoundary}) need it for an EXACT stable/volatile
+ * split: without the marker their split falls back to regex (OpenRouter — leaks
+ * memory/MCP/session sections into the cached prefix) or treats the WHOLE prompt
+ * as stable (Gemini — the per-turn git/env/memory ride in `systemInstruction`,
+ * so Antigravity's exact-prefix cache cold-starts every turn). Emitting it here
+ * is what lets those providers hold a byte-stable cached prefix.
+ */
+export function shouldEmitSystemPromptBoundary(): boolean {
+  if (shouldUseGlobalCacheScope()) return true
+  return providerSplitsSystemBoundary(getAPIProvider())
 }
 
 export const getAllModelBetas = memoize((model: string): string[] => {

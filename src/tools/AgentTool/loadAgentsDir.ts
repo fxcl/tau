@@ -36,6 +36,8 @@ import {
   clearPluginAgentCache,
   loadPluginAgents,
 } from '../../utils/plugins/loadPluginAgents.js'
+import { getPowerModeFromSettings } from '../../utils/powerMode.js'
+import { getInitialSettings } from '../../utils/settings/settings.js'
 import { HooksSchema, type HooksSettings } from '../../utils/settings/types.js'
 import { jsonStringify } from '../../utils/slowOperations.js'
 import { FILE_EDIT_TOOL_NAME } from '../FileEditTool/constants.js'
@@ -295,8 +297,13 @@ async function initializeAgentMemorySnapshots(
 
 export const getAgentDefinitionsWithOverrides = memoize(
   async (cwd: string): Promise<AgentDefinitionsResult> => {
-    // Simple mode: skip custom agents, only return built-ins
-    if (isEnvTruthy(process.env.CLAUDE_CODE_SIMPLE)) {
+    // Simple mode: skip custom agents, only return built-ins.
+    // Cheap power mode does the same — folder/plugin agents are ignored
+    // (the Agent tool itself is also removed from the pool in cheap mode).
+    if (
+      isEnvTruthy(process.env.CLAUDE_CODE_SIMPLE) ||
+      getPowerModeFromSettings(getInitialSettings()) === 'cheap'
+    ) {
       const builtInAgents = getBuiltInAgents()
       return {
         activeAgents: builtInAgents,

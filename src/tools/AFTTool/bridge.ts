@@ -4,6 +4,9 @@ import { getSessionId } from '../../bootstrap/state.js'
 import { getCwd } from '../../utils/cwd.js'
 import { logForDebugging } from '../../utils/debug.js'
 import { errorMessage } from '../../utils/errors.js'
+import { isPrebuiltToolToggleDisabled } from '../../utils/prebuiltToolToggles.js'
+import { getInitialSettings } from '../../utils/settings/settings.js'
+import { LSP_TOOL_NAME } from '../LSPTool/prompt.js'
 import { AFT_VERSION } from './constants.js'
 
 type AftBridgeModule = typeof import('@cortexkit/aft-bridge')
@@ -112,9 +115,15 @@ export async function callAftCommand(
 }
 
 export function formatAftUnavailable(error: unknown): string {
+  const fallbackTools = isPrebuiltToolToggleDisabled(
+    LSP_TOOL_NAME,
+    getInitialSettings(),
+  )
+    ? 'Read, Grep, Glob, or Bash'
+    : 'Read, Grep, Glob, Bash, or LSP'
   return [
     `AFT is unavailable: ${errorMessage(error)}`,
     '',
-    'Tau normal tools are unchanged. Continue with Read, Grep, Glob, Bash, or LSP as needed.',
+    `Tau normal tools are unchanged. Continue with ${fallbackTools} as needed.`,
   ].join('\n')
 }

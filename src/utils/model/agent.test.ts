@@ -6,6 +6,11 @@ import {
   resolveAntigravityOpus46AgentModel,
 } from './antigravityAgentModel.js'
 import {
+  isConcreteOpenAIGptModelForProvider,
+  selectFreshOpenAIGptModelForProvider,
+  shouldInheritOpenRouterGptAlias,
+} from './openaiGptModels.js'
+import {
   getRuntimeSkillModel,
   resolveSkillFrontmatterModel,
   shouldHonorSkillModelOverride,
@@ -88,6 +93,40 @@ function main(): void {
       'openai',
     )
     assert(resolved === null, `model=${resolved}`)
+  })
+
+  test('OpenRouter GPT sonnet agents inherit the session GPT model', () => {
+    const concrete = isConcreteOpenAIGptModelForProvider(
+      'openai/gpt-5.4',
+      'openrouter',
+    )
+    const inherit = shouldInheritOpenRouterGptAlias(
+      'sonnet',
+      'openai/gpt-5.4',
+      'openrouter',
+    )
+    const fresh = selectFreshOpenAIGptModelForProvider({
+      fallback: 'openai/gpt-5.5',
+      selected: 'openai/gpt-5.4',
+      provider: 'openrouter',
+      renderedMainLoopModel: 'openai/gpt-5.5',
+    })
+    const directOpenAi = shouldInheritOpenRouterGptAlias(
+      'sonnet',
+      'openai/gpt-5.4',
+      'openai',
+    )
+    const haiku = shouldInheritOpenRouterGptAlias(
+      'haiku',
+      'openai/gpt-5.4',
+      'openrouter',
+    )
+
+    assert(concrete, 'OpenRouter openai/gpt-* should count as concrete GPT')
+    assert(inherit, 'expected OpenRouter GPT sonnet alias to inherit parent')
+    assert(fresh === 'openai/gpt-5.4', `fresh=${fresh}`)
+    assert(!directOpenAi, 'direct OpenAI provider should keep normal aliases')
+    assert(!haiku, 'haiku aliases should keep the fast-model mapping')
   })
 
   test('non-Cursor skill aliases inherit the caller model', () => {
