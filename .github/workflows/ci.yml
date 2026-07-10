@@ -13,6 +13,34 @@ on:
   workflow_dispatch:
 
 jobs:
+  # Unit tests — run the 88 hand-rolled bun test files on every push and PR.
+  # Kept as a separate job from the build+smoke `test:` job below so a unit
+  # test regression is observable in isolation and does not mask the build
+  # / smoke signal (and vice versa). Windows is intentionally excluded:
+  # bun on Windows CI is flaky, matching the `build-bun` job's policy.
+  unit-tests:
+    name: Unit tests (bun) - ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Run bun test
+        run: bun test
+
   # Main matrix
   # Every OS x Node 20 (minimum) and Node 22 (current LTS). fail-fast is
   # off so a macOS failure doesn't hide a Linux or Windows issue.
