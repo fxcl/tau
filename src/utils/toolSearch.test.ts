@@ -4,8 +4,11 @@
  * Run via: bun run src/utils/toolSearch.test.ts
  */
 
+import { TOOL_SEARCH_TOOL_NAME } from '../tools/ToolSearchTool/constants.js'
+import { shouldDisableToolDeferralForProvider } from './toolDeferralPolicy.js'
 import { providerSupportsAnthropicToolSearch } from './model/providerCapabilities.js'
 import { extractDiscoveredToolNames } from './toolDiscoveryScan.js'
+import { selectToolsForToolSearchRequest } from './toolSearchRequestFilter.js'
 
 let passed = 0
 let failed = 0
@@ -73,6 +76,69 @@ test('direct assistant tool_use marks deferred tool as discovered for retry', ()
   ])
 
   assert(discovered.has('TaskUpdate'), 'TaskUpdate should be discovered')
+})
+
+test('first-party Anthropic disables schema deferral', () => {
+  assert(
+    shouldDisableToolDeferralForProvider('firstParty', 'normal'),
+    'first-party normal mode should send schemas inline',
+  )
+  assert(
+    shouldDisableToolDeferralForProvider('firstParty', 'full'),
+    'first-party full mode should send schemas inline',
+  )
+})
+
+test('Bedrock keeps existing Anthropic deferral policy', () => {
+  assert(
+    !shouldDisableToolDeferralForProvider('bedrock', 'normal'),
+    'bedrock normal mode should keep existing deferral',
+  )
+  assert(
+    !shouldDisableToolDeferralForProvider('bedrock', 'full'),
+    'bedrock full mode should keep existing deferral',
+  )
+})
+
+test('first-party Anthropic keeps deferred schemas on the request', () => {
+  const tools = [
+    { name: TOOL_SEARCH_TOOL_NAME },
+    { name: 'Read' },
+    { name: 'TaskUpdate' },
+    { name: 'WebFetch' },
+  ] as any
+
+  const selected = selectToolsForToolSearchRequest(tools, {
+    useToolSearch: true,
+    useNativeLaneToolSearch: false,
+    deferredToolNames: new Set(['TaskUpdate', 'WebFetch']),
+    discoveredToolNames: new Set(['TaskUpdate']),
+    provider: 'firstParty',
+  }).map(tool => tool.name)
+
+  assert(selected.includes('WebFetch'), 'undiscovered deferred tool was filtered')
+  assert(selected.length === tools.length, 'first-party should keep all tools')
+})
+
+test('non-first-party Anthropic providers keep discovered-only filtering', () => {
+  const tools = [
+    { name: TOOL_SEARCH_TOOL_NAME },
+    { name: 'Read' },
+    { name: 'TaskUpdate' },
+    { name: 'WebFetch' },
+  ] as any
+
+  const selected = selectToolsForToolSearchRequest(tools, {
+    useToolSearch: true,
+    useNativeLaneToolSearch: false,
+    deferredToolNames: new Set(['TaskUpdate', 'WebFetch']),
+    discoveredToolNames: new Set(['TaskUpdate']),
+    provider: 'bedrock',
+  }).map(tool => tool.name)
+
+  assert(selected.includes(TOOL_SEARCH_TOOL_NAME), 'ToolSearch was filtered')
+  assert(selected.includes('TaskUpdate'), 'discovered tool was filtered')
+  assert(!selected.includes('WebFetch'), 'undiscovered tool should stay filtered')
 })
 
 console.log(`\n${passed} passed, ${failed} failed`)

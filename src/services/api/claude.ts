@@ -35,7 +35,6 @@ import {
   type Tool,
   type ToolPermissionContext,
   type Tools,
-  toolMatchesName,
 } from '../../Tool.js'
 import type { AgentDefinition } from '../../tools/AgentTool/loadAgentsDir.js'
 import {
@@ -192,6 +191,7 @@ import {
   isToolSearchEnabled,
   isToolSearchToolAvailable,
 } from 'src/utils/toolSearch.js'
+import { selectToolsForToolSearchRequest } from 'src/utils/toolSearchRequestFilter.js'
 import { API_MAX_MEDIA_PER_REQUEST } from '../../constants/apiLimits.js'
 import { ADVISOR_BETA_HEADER } from '../../constants/betas.js'
 import {
@@ -1610,25 +1610,13 @@ async function* queryModel(
   // ToolSearchTool returns tool_reference blocks which unsupported models can't handle
   let filteredTools: Tools
 
-  if (useToolSearch || useNativeLaneToolSearch) {
-    // Dynamic tool loading: Only include deferred tools that have been discovered
-    // via tool_reference blocks in the message history. This eliminates the need
-    // to predeclare all deferred tools upfront and removes limits on tool quantity.
-    const discoveredToolNames = extractDiscoveredToolNames(messages)
-
-    filteredTools = tools.filter(tool => {
-      // Always include non-deferred tools
-      if (!deferredToolNames.has(tool.name)) return true
-      // Always include ToolSearchTool (so it can discover more tools)
-      if (toolMatchesName(tool, TOOL_SEARCH_TOOL_NAME)) return true
-      // Only include deferred tools that have been discovered
-      return discoveredToolNames.has(tool.name)
-    })
-  } else {
-    filteredTools = tools.filter(
-      t => !toolMatchesName(t, TOOL_SEARCH_TOOL_NAME),
-    )
-  }
+  filteredTools = selectToolsForToolSearchRequest(tools, {
+    useToolSearch,
+    useNativeLaneToolSearch,
+    deferredToolNames,
+    discoveredToolNames: extractDiscoveredToolNames(messages),
+    provider: getAPIProvider(),
+  })
 
   // Add tool search beta header if enabled - required for defer_loading to be accepted
   // Header differs by provider: 1P/Foundry use advanced-tool-use, Vertex/Bedrock use tool-search-tool

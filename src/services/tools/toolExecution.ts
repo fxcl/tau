@@ -68,6 +68,7 @@ import {
   filterDisabledPrebuiltTools,
   isOptionalPrebuiltToolName,
 } from '../../utils/prebuiltToolToggles.js'
+import { getAPIProvider } from '../../utils/model/providers.js'
 import { getInitialSettings } from '../../utils/settings/settings.js'
 import {
   AbortError,
@@ -623,6 +624,7 @@ export function buildSchemaNotSentHint(
   // that isn't callable; occasional misfires (Haiku, tst-auto below threshold)
   // cost one extra round-trip on an already-failing path.
   if (!isToolSearchEnabledOptimistic()) return null
+  if (getAPIProvider() === 'firstParty') return null
   if (!isToolSearchToolAvailable(tools)) return null
   if (!isDeferredTool(tool)) return null
   const discovered = extractDiscoveredToolNames(messages)

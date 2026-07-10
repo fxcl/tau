@@ -2,10 +2,10 @@ import { feature } from 'bun:bundle'
 import { isReplBridgeActive } from '../../bootstrap/state.js'
 import { getFeatureValue_CACHED_MAY_BE_STALE } from '../../services/analytics/growthbook.js'
 import type { Tool } from '../../Tool.js'
-import { providerSupportsAnthropicToolSearch } from '../../utils/model/providerCapabilities.js'
 import { getAPIProvider } from '../../utils/model/providers.js'
 import { getPowerModeFromSettings } from '../../utils/powerMode.js'
 import { getInitialSettings } from '../../utils/settings/settings.js'
+import { shouldDisableToolDeferralForProvider } from '../../utils/toolDeferralPolicy.js'
 import { AGENT_TOOL_NAME } from '../AgentTool/constants.js'
 
 // Dead code elimination: Brief tool name only needed when KAIROS or KAIROS_BRIEF is on
@@ -78,16 +78,13 @@ export function isDeferredTool(tool: Tool): boolean {
   //     fixed allowlist so deferral saves almost nothing, and MCP tools are
   //     already excluded from the pool, so this can't pull MCP into the prompt.
   //   - normal (the default): never defer on a native lane — the schema-fail
-  //     case above. First-party Anthropic (and Bedrock/Vertex/Foundry) keep
-  //     server-side defer_loading, which is invisible to the model and never
-  //     fails, so they still defer here.
+  //     non-Anthropic lanes; Bedrock/Vertex/Foundry keep their existing
+  //     server-side deferral behavior.
   //   - full (retired/hidden): unchanged — defers as before.
+  // Policy override: first-party Anthropic keeps schemas inline to avoid
+  // direct calls with hidden/remembered parameter shapes.
   const powerMode = getPowerModeFromSettings(getInitialSettings())
-  if (powerMode === 'cheap') return false
-  if (
-    powerMode === 'normal' &&
-    !providerSupportsAnthropicToolSearch(getAPIProvider())
-  ) {
+  if (shouldDisableToolDeferralForProvider(getAPIProvider(), powerMode)) {
     return false
   }
 

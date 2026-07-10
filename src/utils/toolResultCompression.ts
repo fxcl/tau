@@ -1,3 +1,5 @@
+import { distillCommandOutput, isOutputDistillEnabled } from './outputDistill.js'
+
 const TOOL_RESULT_COMPRESSION_ENV_KEYS = [
   'TAU_TOOL_RESULT_COMPRESSION',
   'CLAUDE_CODE_TOOL_RESULT_COMPRESSION',
@@ -105,7 +107,17 @@ export function selectToolResultPreview(
   originalContent: unknown,
   maxChars: number,
 ): string {
-  if (!isToolResultCompressionEnabled() || typeof originalContent !== 'string') {
+  if (typeof originalContent !== 'string') {
+    return fallbackPreview
+  }
+  // Structure-aware distillation first (default ON): recognized test/build/
+  // lint output keeps failures + summary instead of the first N bytes. The
+  // full output is already persisted, so nothing dropped here is lost.
+  if (isOutputDistillEnabled()) {
+    const distilled = distillCommandOutput(originalContent, maxChars)
+    if (distilled !== null) return distilled
+  }
+  if (!isToolResultCompressionEnabled()) {
     return fallbackPreview
   }
   return (

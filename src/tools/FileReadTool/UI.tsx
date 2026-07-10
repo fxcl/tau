@@ -31,6 +31,7 @@ export function renderToolUseMessage({
   file_path,
   offset,
   limit,
+  skeleton,
   pages
 }: Partial<Input>, {
   verbose
@@ -51,6 +52,12 @@ export function renderToolUseMessage({
     return <>
         <FilePathLink filePath={file_path}>{displayPath}</FilePathLink>
         {` · pages ${pages}`}
+      </>;
+  }
+  if (skeleton) {
+    return <>
+        <FilePathLink filePath={file_path}>{displayPath}</FilePathLink>
+        {' · skeleton'}
       </>;
   }
   if (verbose && (offset || limit)) {
@@ -137,6 +144,30 @@ export function renderToolResultMessage(output: Output): React.ReactNode {
       {
         return <MessageResponse height={1}>
           <Text dimColor>Unchanged since last read</Text>
+        </MessageResponse>;
+      }
+    case 'skeleton':
+      {
+        const {
+          keptLines,
+          totalLines,
+          elidedRegions,
+          truncatedLines
+        } = output.file;
+        // A skeleton may elide bodies, truncate overlong lines, or both — omit
+        // whichever did not happen rather than reporting a bare zero.
+        const details: string[] = [];
+        if (elidedRegions > 0) {
+          details.push(`${elidedRegions} ${elidedRegions === 1 ? 'body' : 'bodies'} elided`);
+        }
+        if (truncatedLines > 0) {
+          details.push(`${truncatedLines} long ${truncatedLines === 1 ? 'line' : 'lines'} truncated`);
+        }
+        const suffix = details.length > 0 ? `, ${details.join(', ')}` : '';
+        return <MessageResponse height={1}>
+          <Text>
+            Read skeleton (<Text bold>{keptLines}</Text>{` of ${totalLines} lines${suffix})`}
+          </Text>
         </MessageResponse>;
       }
   }

@@ -72,10 +72,12 @@ import {
 import type { PermissionDecision } from '../../utils/permissions/PermissionResult.js'
 import { matchWildcardPattern } from '../../utils/permissions/shellRuleMatching.js'
 import { readFileInRange } from '../../utils/readFileInRange.js'
+import { semanticBoolean } from '../../utils/semanticBoolean.js'
 import { semanticNumber } from '../../utils/semanticNumber.js'
 import { jsonStringify } from '../../utils/slowOperations.js'
 import { BASH_TOOL_NAME } from '../BashTool/toolName.js'
 import { getDefaultFileReadingLimits } from './limits.js'
+import { buildSkeleton, fileReadTokenLimitAdvice } from './skeleton.js'
 import {
   DESCRIPTION,
   FILE_READ_TOOL_NAME,
@@ -177,9 +179,12 @@ export class MaxFileReadTokenExceededError extends Error {
   constructor(
     public tokenCount: number,
     public maxTokens: number,
+    // Trailing guidance. Defaulted so the generic form is preserved for any
+    // caller that does not compute advice (e.g. the attachment fallback path).
+    advice = 'Use offset and limit parameters to read specific portions of the file, or search for specific content instead of reading the whole file.',
   ) {
     super(
-      `File content (${tokenCount} tokens) exceeds maximum allowed tokens (${maxTokens}). Use offset and limit parameters to read specific portions of the file, or search for specific content instead of reading the whole file.`,
+      `File content (${tokenCount} tokens) exceeds maximum allowed tokens (${maxTokens}). ${advice}`,
     )
     this.name = 'MaxFileReadTokenExceededError'
   }
@@ -233,6 +238,9 @@ const inputSchema = lazySchema(() =>
     ),
     limit: semanticNumber(z.number().int().positive().optional()).describe(
       'The number of lines to read. Only provide if the file is too large to read at once.',
+    ),
+    skeleton: semanticBoolean(z.boolean().optional()).describe(
+      'Return the file structure instead of full content: imports, signatures, and class shapes, with long function bodies elided. Each elision marker shows the exact offset/limit Read call to expand that body, and line numbers are the real file line numbers. Ideal first look at a large code file. Supported for common code languages (ts/js/py/go/rs/java/rb/cs/c/cpp/php); other files fall back to a normal read. Editing still requires a full-content Read first.',
     ),
     pages: z
       .string()
@@ -327,6 +335,26 @@ const outputSchema = lazySchema(() => {
       type: z.literal('file_unchanged'),
       file: z.object({
         filePath: z.string().describe('The path to the file'),
+      }),
+    }),
+    z.object({
+      type: z.literal('skeleton'),
+      file: z.object({
+        filePath: z.string().describe('The path to the file that was read'),
+        formatted: z
+          .string()
+          .describe('Line-numbered structure view with body-elision markers'),
+        keptLines: z.number().describe('Original lines still visible'),
+        elidedLines: z.number().describe('Original lines elided'),
+        elidedRegions: z.number().describe('Number of elided body regions'),
+        truncatedLines: z
+          .number()
+          .describe('Kept lines truncated for being too long to inline'),
+        truncatedChars: z
+          .number()
+          .describe('Characters dropped across all truncated lines'),
+        totalLines: z.number().describe('Total lines in the file'),
+        language: z.string().describe('Grammar used to parse the file'),
       }),
     }),
   ])
@@ -497,7 +525,7 @@ export const FileReadTool = buildTool({
     return { result: true }
   },
   async call(
-    { file_path, offset = 1, limit = undefined, pages },
+    { file_path, offset = 1, limit = undefined, skeleton = false, pages },
     context,
     _canUseTool?,
     parentMessage?,
@@ -540,9 +568,11 @@ export const FileReadTool = buildTool({
       'tengu_read_dedup_killswitch',
       false,
     )
-    const existingState = dedupKillswitch
-      ? undefined
-      : readFileState.get(fullFilePath)
+    // Skeleton reads never dedup: they are cheap to recompute and their
+    // output shape differs from the full-content read the dedup stub
+    // would point the model back to.
+    const existingState =
+      dedupKillswitch || skeleton ? undefined : readFileState.get(fullFilePath)
     // Only dedup entries that came from a prior Read (offset is always set
     // by Read). Edit/Write store offset=undefined — their readFileState
     // entry reflects post-edit mtime, so deduping against it would wrongly
@@ -607,6 +637,7 @@ export const FileReadTool = buildTool({
         readFileState,
         context,
         parentMessage?.message.id,
+        skeleton,
       )
     } catch (error) {
       // Handle file-not-found: suggest similar files
@@ -630,6 +661,7 @@ export const FileReadTool = buildTool({
               readFileState,
               context,
               parentMessage?.message.id,
+              skeleton,
             )
           } catch (altError) {
             if (!isENOENT(altError)) {
@@ -692,6 +724,37 @@ export const FileReadTool = buildTool({
           type: 'tool_result',
           content: FILE_UNCHANGED_STUB,
         }
+      case 'skeleton': {
+        // Built from parts: a skeleton may elide bodies, truncate overlong
+        // lines, or both, and claiming "0 bodies elided" reads like a failure.
+        const { elidedRegions, elidedLines, totalLines, truncatedLines, truncatedChars } = data.file
+        const parts = ['Skeleton view:']
+        if (elidedRegions > 0) {
+          parts.push(
+            `${elidedRegions} function ${elidedRegions === 1 ? 'body' : 'bodies'} elided (${elidedLines} of ${totalLines} lines); each ⋮ marker shows the exact Read offset/limit to expand that body.`,
+          )
+        }
+        if (truncatedLines > 0) {
+          parts.push(
+            `${truncatedLines} overlong ${truncatedLines === 1 ? 'line was' : 'lines were'} truncated (${truncatedChars} chars dropped); such lines are typically minified code, inline sourcemaps, or embedded blobs, and re-reading one alone may still exceed the token limit.`,
+          )
+        }
+        parts.push(
+          'Line numbers are real file line numbers. Before editing this file, Read the relevant full range first.',
+        )
+        const note = `<system-reminder>${parts.join(' ')}</system-reminder>`
+        return {
+          tool_use_id: toolUseID,
+          type: 'tool_result',
+          content:
+            data.file.formatted +
+            '\n\n' +
+            note +
+            (shouldIncludeFileReadMitigation()
+              ? CYBER_RISK_MITIGATION_REMINDER
+              : ''),
+        }
+      }
       case 'text': {
         let content: string
 
@@ -759,6 +822,11 @@ async function validateContentTokens(
   content: string,
   ext: string,
   maxTokens?: number,
+  // True when the read that produced `content` was a skeleton request (either
+  // the skeleton output itself, or a full-read fall-through after skeleton
+  // produced nothing). Suppresses the "retry with skeleton" hint so the model
+  // cannot loop on the same failing mode.
+  skeletonRequested = false,
 ): Promise<void> {
   const effectiveMaxTokens =
     maxTokens ?? getDefaultFileReadingLimits().maxTokens
@@ -770,7 +838,11 @@ async function validateContentTokens(
   const effectiveCount = tokenCount ?? tokenEstimate
 
   if (effectiveCount > effectiveMaxTokens) {
-    throw new MaxFileReadTokenExceededError(effectiveCount, effectiveMaxTokens)
+    throw new MaxFileReadTokenExceededError(
+      effectiveCount,
+      effectiveMaxTokens,
+      fileReadTokenLimitAdvice(ext, skeletonRequested),
+    )
   }
 }
 
@@ -817,6 +889,7 @@ async function callInner(
   readFileState: ToolUseContext['readFileState'],
   context: ToolUseContext,
   messageId: string | undefined,
+  skeleton = false,
 ): Promise<{
   data: Output
   newMessages?: ReturnType<typeof createUserMessage>[]
@@ -1019,6 +1092,80 @@ async function callInner(
     }
   }
 
+  // --- Skeleton view (structure with long function bodies elided) ---
+  // Only reached for text files: notebook/image/PDF branches returned above.
+  // Any unsupported/unparseable case falls through to the normal text read.
+  if (skeleton) {
+    // Allow larger files than a plain full read: the OUTPUT is what reaches
+    // the model and it is dramatically smaller (and still token-validated).
+    const skeletonSizeBytes = Math.max(
+      maxSizeBytes,
+      Math.min(maxSizeBytes * 4, 2_000_000),
+    )
+    const fullRead = await readFileInRange(
+      resolvedFilePath,
+      0,
+      undefined,
+      skeletonSizeBytes,
+      context.abortController.signal,
+    )
+    const skeletonResult = await buildSkeleton(fullRead.content, ext, (c, s) =>
+      addLineNumbers({ content: c, startLine: s }),
+    )
+    if (skeletonResult) {
+      // Always skeletonRequested=true here: this content IS a skeleton, so a
+      // token overflow must not tell the model to "try skeleton" again.
+      await validateContentTokens(skeletonResult.formatted, ext, maxTokens, true)
+
+      // Partial view: store RAW disk content for diffing, and flag it so
+      // Edit/Write demand a real full-content Read before mutating.
+      readFileState.set(fullFilePath, {
+        content: fullRead.content,
+        timestamp: Math.floor(fullRead.mtimeMs),
+        offset: undefined,
+        limit: undefined,
+        isPartialView: true,
+      })
+      context.nestedMemoryAttachmentTriggers?.add(fullFilePath)
+
+      logFileOperation({
+        operation: 'read',
+        tool: 'FileReadTool',
+        filePath: fullFilePath,
+        content: skeletonResult.formatted,
+      })
+      const analyticsExt = getFileExtensionForAnalytics(fullFilePath)
+      logEvent('tengu_file_read_skeleton', {
+        totalLines: skeletonResult.totalLines,
+        keptLines: skeletonResult.keptLines,
+        elidedLines: skeletonResult.elidedLines,
+        elidedRegions: skeletonResult.elidedRegions,
+        truncatedLines: skeletonResult.truncatedLines,
+        truncatedChars: skeletonResult.truncatedChars,
+        ...(analyticsExt !== undefined && { ext: analyticsExt }),
+      })
+
+      return {
+        data: {
+          type: 'skeleton' as const,
+          file: {
+            filePath: file_path,
+            formatted: skeletonResult.formatted,
+            keptLines: skeletonResult.keptLines,
+            elidedLines: skeletonResult.elidedLines,
+            elidedRegions: skeletonResult.elidedRegions,
+            truncatedLines: skeletonResult.truncatedLines,
+            truncatedChars: skeletonResult.truncatedChars,
+            totalLines: skeletonResult.totalLines,
+            language: skeletonResult.language,
+          },
+        },
+      }
+    }
+    // Fall through to a normal read below (unsupported language, parse
+    // failure, or nothing long enough to elide).
+  }
+
   // --- Text file (single async read via readFileInRange) ---
   const lineOffset = offset === 0 ? 0 : offset - 1
   const { content, lineCount, totalLines, totalBytes, readBytes, mtimeMs } =
@@ -1030,7 +1177,10 @@ async function callInner(
       context.abortController.signal,
     )
 
-  await validateContentTokens(content, ext, maxTokens)
+  // Pass the requested skeleton flag: when skeleton was asked for but produced
+  // nothing (no elidable body / unsupported), we fell through to this full
+  // read. If it overflows, the error must not loop the model back to skeleton.
+  await validateContentTokens(content, ext, maxTokens, skeleton)
 
   readFileState.set(fullFilePath, {
     content,

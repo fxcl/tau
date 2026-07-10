@@ -35,6 +35,11 @@ type ParserClass = {
 type LanguageClass = { load(bytes: Uint8Array): Promise<unknown> }
 type TreeSitterModule = { Parser: ParserClass; Language: LanguageClass }
 
+export type SyntaxPoint = {
+  row: number
+  column: number
+}
+
 export type SyntaxNode = {
   type: string
   isError: boolean
@@ -42,6 +47,12 @@ export type SyntaxNode = {
   hasError: boolean
   childCount: number
   child(index: number): SyntaxNode | null
+  // Position accessors (present on every web-tree-sitter node; typed here so
+  // structural consumers like the Read skeleton mode can use them).
+  startPosition: SyntaxPoint
+  endPosition: SyntaxPoint
+  startIndex: number
+  endIndex: number
 }
 
 export type SyntaxTree = {

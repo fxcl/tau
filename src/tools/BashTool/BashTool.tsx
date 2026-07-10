@@ -1,6 +1,6 @@
 import { feature } from 'bun:bundle';
 import type { ToolResultBlockParam } from '@anthropic-ai/sdk/resources/index.mjs';
-import { copyFile, stat as fsStat, truncate as fsTruncate, link } from 'fs/promises';
+import { copyFile, stat as fsStat, truncate as fsTruncate, link, open as fsOpen } from 'fs/promises';
 import path from 'path';
 import * as React from 'react';
 import type { CanUseToolFn } from 'src/hooks/useCanUseTool.js';
@@ -350,6 +350,35 @@ function getCommandTypeForLogging(command: string): AnalyticsMetadata_I_VERIFIED
   }
   return 'other' as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS;
 }
+/** Bytes of persisted-output tail captured for the distilled preview. */
+const TAIL_SAMPLE_BYTES = 16_384;
+
+/**
+ * Read the tail of a persisted output file, starting past the in-memory head
+ * chunk so head and tail never overlap. Returns undefined when the file has
+ * no bytes beyond the head or on any read error (preview falls back to the
+ * head-only behavior).
+ */
+async function readPersistedTailSample(filePath: string, fileSize: number, headBytes: number): Promise<string | undefined> {
+  const start = Math.max(headBytes, fileSize - TAIL_SAMPLE_BYTES);
+  const length = fileSize - start;
+  if (length <= 0) return undefined;
+  try {
+    const handle = await fsOpen(filePath, 'r');
+    try {
+      const buffer = Buffer.alloc(length);
+      const {
+        bytesRead
+      } = await handle.read(buffer, 0, length, start);
+      if (bytesRead <= 0) return undefined;
+      return buffer.subarray(0, bytesRead).toString('utf8');
+    } finally {
+      await handle.close();
+    }
+  } catch {
+    return undefined;
+  }
+}
 const outputSchema = lazySchema(() => z.object({
   stdout: z.string().describe('The standard output of the command'),
   stderr: z.string().describe('The standard error output of the command'),
@@ -366,6 +395,7 @@ const outputSchema = lazySchema(() => z.object({
   structuredContent: z.array(z.any()).optional().describe('Structured content blocks'),
   persistedOutputPath: z.string().optional().describe('Path to the persisted full output in tool-results dir (set when output is too large for inline)'),
   persistedOutputSize: z.number().optional().describe('Total size of the output in bytes (set when output is too large for inline)'),
+  persistedTailSample: z.string().optional().describe('Last bytes of the persisted output (closing summaries land here); feeds the distilled preview, never shown raw'),
   cwdNote: z.string().optional().describe('Model-facing note stating the directory the command ran in / session cwd changes'),
   commandPartsNote: z.string().optional().describe('Model-facing note stating that mismatched/malformed command_parts were ignored and `command` ran as written')
 }));
@@ -714,6 +744,7 @@ export const BashTool = buildTool({
     structuredContent,
     persistedOutputPath,
     persistedOutputSize,
+    persistedTailSample,
     cwdNote,
     commandPartsNote
   }, toolUseID): ToolResultBlockParam {
@@ -743,13 +774,18 @@ export const BashTool = buildTool({
     // message for the model. The UI never sees this — it uses data.stdout.
     if (persistedOutputPath) {
       const preview = generatePreview(processedStdout, PREVIEW_SIZE_BYTES);
+      // Distill source = head chunk + file tail (captured at call time):
+      // closing summaries live at the end of the stream, past the
+      // end-truncated in-memory head. Deterministic given the stored data,
+      // so re-mapping yields byte-identical content.
+      const distillSource = persistedTailSample ? `${processedStdout}\n[… middle of output omitted …]\n${persistedTailSample}` : processedStdout;
       processedStdout = buildLargeToolResultMessage({
         filepath: persistedOutputPath,
         originalSize: persistedOutputSize ?? 0,
         isJson: false,
         preview: preview.preview,
         hasMore: preview.hasMore
-      });
+      }, distillSource);
     }
     let errorMessage = stderr.trim();
     if (interrupted) {
@@ -1008,6 +1044,7 @@ export const BashTool = buildTool({
     const MAX_PERSISTED_SIZE = 64 * 1024 * 1024;
     let persistedOutputPath: string | undefined;
     let persistedOutputSize: number | undefined;
+    let persistedTailSample: string | undefined;
     if (result.outputFilePath && result.outputTaskId) {
       try {
         const fileStat = await fsStat(result.outputFilePath);
@@ -1023,6 +1060,17 @@ export const BashTool = buildTool({
           await copyFile(result.outputFilePath, dest);
         }
         persistedOutputPath = dest;
+        // The in-memory stdout is the END-TRUNCATED head of the stream, but
+        // closing summaries ("Tests: 2 failed, 296 passed") live at the END.
+        // Capture the file tail once here (call-time, async) so the distilled
+        // preview in mapToolResultToToolResultBlockParam — which must stay
+        // synchronous and deterministic — can include it. Read from past the
+        // head chunk so head+tail never overlap.
+        persistedTailSample = await readPersistedTailSample(
+          dest,
+          fileStat.size,
+          Buffer.byteLength(stdout, 'utf8'),
+        );
       } catch {
         // File may already be gone — stdout preview is sufficient
       }
@@ -1111,7 +1159,8 @@ export const BashTool = buildTool({
       assistantAutoBackgrounded: result.assistantAutoBackgrounded,
       dangerouslyDisableSandbox: 'dangerouslyDisableSandbox' in input ? input.dangerouslyDisableSandbox as boolean | undefined : undefined,
       persistedOutputPath,
-      persistedOutputSize
+      persistedOutputSize,
+      persistedTailSample
     };
     // Record success for retry guard (clears failure tracking for this command)
     recordBashSuccess(input.command, executionDir);

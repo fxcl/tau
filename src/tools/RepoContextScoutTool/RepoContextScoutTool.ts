@@ -5,6 +5,7 @@ import { z } from 'zod/v4'
 
 import { buildTool, type ToolDef } from '../../Tool.js'
 import { Text } from '../../ink.js'
+import { collectCoChangeCoupling } from '../../utils/changeCoupling.js'
 import {
   assessChangeRisk,
   collectGitChangeSummary,
@@ -76,6 +77,14 @@ const changedFileSchema = z.object({
   deletions: z.number().optional(),
 })
 
+const coChangePartnerSchema = z.object({
+  path: z.string(),
+  partnerOf: z.string(),
+  score: z.number(),
+  ratio: z.number(),
+  lastCoChange: z.string().optional(),
+})
+
 const outputSchema = lazySchema(() =>
   z.object({
     task: z.string(),
@@ -97,6 +106,13 @@ const outputSchema = lazySchema(() =>
       deletions: z.number(),
       warnings: z.array(z.string()),
     }),
+    coupling: z
+      .object({
+        partners: z.array(coChangePartnerSchema),
+        commitsScanned: z.number(),
+        warnings: z.array(z.string()),
+      })
+      .optional(),
     risk: z.object({
       level: z.enum(['low', 'medium', 'high']),
       score: z.number(),
@@ -122,6 +138,9 @@ function buildContextPlan(output: Omit<Output, 'contextPlan'>): string[] {
   }
   if (output.changes.changedFiles.length > 0) {
     plan.push('Anchor review around the detected changed files before widening context.')
+  }
+  if ((output.coupling?.partners.length ?? 0) > 0) {
+    plan.push('Check the co-change partners below — files that historically ship with the ones being changed but are untouched so far.')
   }
   if (output.workflow.recommendations.length > 0) {
     plan.push('Use ProjectWorkflow recommendations for build, test, lint, or dev commands instead of guessing.')
@@ -214,6 +233,13 @@ export const RepoContextScoutTool = buildTool({
     const changes = await collectGitChangeSummary(root, input.changedFiles)
     const risk = assessChangeRisk(changes)
     const hasCodeGraph = existsSync(join(changes.root, '.codegraph'))
+    const coupling =
+      changes.isGitRepo && changes.changedFiles.length > 0
+        ? await collectCoChangeCoupling(
+            changes.root,
+            changes.changedFiles.map(file => file.path),
+          )
+        : { partners: [], commitsScanned: 0, warnings: [] }
 
     const partial = {
       task: input.task,
@@ -230,6 +256,7 @@ export const RepoContextScoutTool = buildTool({
         deletions: changes.deletions,
         warnings: changes.warnings,
       },
+      coupling,
       risk: {
         level: risk.level,
         score: risk.score,
@@ -274,6 +301,16 @@ export const RepoContextScoutTool = buildTool({
       ...(output.risk.triggers.length > 0
         ? output.risk.triggers.map(trigger => `- ${trigger}`)
         : ['- none']),
+      ...((output.coupling?.partners.length ?? 0) > 0
+        ? [
+            '',
+            `Co-change partners (committed together historically over ${output.coupling!.commitsScanned} commits, NOT in the current change):`,
+            ...output.coupling!.partners.map(
+              partner =>
+                `- ${partner.path} — ships with ${partner.partnerOf} in ${Math.round(partner.ratio * 100)}% of its commits (weight ${partner.score}${partner.lastCoChange ? `, last ${partner.lastCoChange}` : ''})`,
+            ),
+          ]
+        : []),
       '',
       'Suggested checks:',
       ...(output.risk.suggestedChecks.length > 0
